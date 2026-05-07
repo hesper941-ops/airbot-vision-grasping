@@ -7,7 +7,7 @@ import time
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PointStamped
-from airbot_py.arm import AIRBOTPlay, RobotMode, SpeedProfile
+from robot_arm_interface.airbot_wrapper import AirbotWrapper
 
 
 class CameraTargetExecutor(Node):
@@ -77,20 +77,9 @@ class CameraTargetExecutor(Node):
                 f'Move to target: ({target[0]:.3f}, {target[1]:.3f}, {target[2]:.3f})'
             )
 
-            robot = AIRBOTPlay(url=self.robot_url, port=self.robot_port)
-            robot.connect()
-            robot.set_speed_profile(SpeedProfile.SLOW)
-
-            pose = robot.get_end_pose()
-            if pose is None or len(pose) < 2:
-                raise RuntimeError('Failed to read current end pose.')
-
-            current_quat = list(pose[1])
-
-            robot.switch_mode(RobotMode.PLANNING_WAYPOINTS)
-            robot.move_with_cart_waypoints([
-                [target, current_quat],
-            ])
+            robot = AirbotWrapper(url=self.robot_url, port=self.robot_port)
+            robot.connect(speed_profile='slow')
+            robot.move_to_cart_target_with_current_orientation(target)
             time.sleep(self.motion_sleep)
 
             self.get_logger().info('Target move executed.')

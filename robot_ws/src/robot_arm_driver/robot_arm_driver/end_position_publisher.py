@@ -4,7 +4,7 @@
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
-from airbot_py.arm import AIRBOTPlay
+from robot_arm_interface.airbot_wrapper import AirbotWrapper
 
 
 class EndPosePublisher(Node):
@@ -17,13 +17,13 @@ class EndPosePublisher(Node):
             10
         )
 
-        self.robot = AIRBOTPlay(url="localhost", port=50001)
+        self.robot = AirbotWrapper(url="localhost", port=50001)
         self.connected = False
 
         try:
-            self.robot.connect()
+            self.robot.connect(speed_profile='default')
             self.connected = True
-            self.get_logger().info('Connected to robot server.')
+            self.get_logger().info('Connected to robot server through AirbotWrapper.')
         except Exception as e:
             self.get_logger().error(f'Failed to connect to robot server: {e}')
 
@@ -36,6 +36,9 @@ class EndPosePublisher(Node):
 
         try:
             pose = self.robot.get_end_pose()
+            if pose is None or len(pose) < 2:
+                raise RuntimeError('Failed to get valid end pose.')
+
             position = pose[0]
             quaternion = pose[1]
 
@@ -53,13 +56,6 @@ class EndPosePublisher(Node):
             msg.pose.orientation.w = float(quaternion[3])
 
             self.publisher_.publish(msg)
-
-            self.get_logger().info(
-                f'Published end pose: '
-                f'pos=({msg.pose.position.x}, {msg.pose.position.y}, {msg.pose.position.z}), '
-                f'quat=({msg.pose.orientation.x}, {msg.pose.orientation.y}, '
-                f'{msg.pose.orientation.z}, {msg.pose.orientation.w})'
-            )
 
         except Exception as e:
             self.get_logger().error(f'Failed to get end pose: {e}')
