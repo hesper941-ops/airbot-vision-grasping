@@ -1,0 +1,42 @@
+# ===== Git / OS =====
+.DS_Store
+Thumbs.db
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.swp
+*.swo
+*.tmp
+
+# ===== VSCode / JetBrains =====
+.vscode/
+.idea/
+
+# ===== ROS / colcon build outputs =====
+build/
+install/
+log/
+
+# ===== Workspace-specific generated dirs =====
+Orbbec_ws/build/
+Orbbec_ws/install/
+Orbbec_ws/log/
+
+robot_ws/build/
+robot_ws/install/
+robot_ws/log/
+
+# ===== Runtime logs =====
+robot_ws/airbot_logs/
+
+# ===== Hand-eye generated data =====
+hand_to_eye/data/images/
+hand_to_eye/data/preview/
+hand_to_eye/data/handeye_output/
+
+# ===== Optional dataset caches =====
+*.bag
+*.db3
