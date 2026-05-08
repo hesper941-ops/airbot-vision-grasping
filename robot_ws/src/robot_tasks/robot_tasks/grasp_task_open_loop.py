@@ -63,6 +63,13 @@ class GraspTaskOpenLoop(Node):
         self.lift_target = None             # 抬升目标（抓取后动态计算）
         self.joint6_compensated = False     # joint6 补偿是否已执行
 
+        # ---- 命令串行化机制 ----
+        self.command_in_flight = False      # 当前是否有命令还在执行
+        self.stage_motion_started = False   # 当前阶段是否已启动运动
+        self.stage_settled = False          # 当前阶段是否已稳定到位
+        self.stage_settle_until = None      # 当前阶段稳定停留的截止时间
+        self.speed_profile_active = 'default'  # 当前速度档位
+
         # ---- 超时 ----
         self.cmd_timeout = timedelta(seconds=self.get_parameter(
             'cmd_timeout_sec').value)
@@ -134,6 +141,10 @@ class GraspTaskOpenLoop(Node):
         # 超时与频率
         self.declare_parameter('cmd_timeout_sec', 10.0)
         self.declare_parameter('loop_hz', 4)
+        # ---- 命令串行化与到位判定 ----
+        self.declare_parameter('position_tolerance_m', 0.02)
+        self.declare_parameter('min_command_interval_sec', 1.0)
+        self.declare_parameter('settle_time_sec', 0.5)
 
     def _config_dict(self) -> dict:
         """将 ROS 参数组装为共享模块所需的 dict 格式。"""
@@ -240,6 +251,7 @@ class GraspTaskOpenLoop(Node):
 
             elif self.task_state == 'DONE':
                 self.get_logger().info('抓取流程完成，返回 IDLE')
+                self._set_speed_profile('default')
                 self._reset_task()
                 self._transition('IDLE')
 
@@ -307,13 +319,22 @@ class GraspTaskOpenLoop(Node):
                 # joint6 补偿后不立即走 Cartesian，等下一周期确认
                 return
 
+        # 切换到慢速档位
+        self._set_speed_profile('slow')
+        
         self.current_stage = 'MOVE_PRE_GRASP'
+        self.stage_motion_started = False
+        self.stage_settled = False
         self._transition('MOVE_PRE_GRASP')
 
     def _handle_move_stage(self, next_state: str):
-        """处理移动阶段：朝当前阶段的路径点走一步。
-
-        如果已到达，自动切换到下一阶段。
+        """处理移动阶段：首次发送命令，然后等待到位+稳定。
+        
+        核心逻辑：
+        1. 进入阶段时发送一次命令（stage_motion_started = False）
+        2. 检查末端位置是否在 position_tolerance 内
+        3. 到位后等待 settle_time_sec
+        4. 稳定后切换到下一个阶段
         """
         if self.last_end_pose is None:
             return
@@ -325,32 +346,59 @@ class GraspTaskOpenLoop(Node):
             self._transition('ABORT')
             return
 
-        # 判断是否到达
-        reach_thresh = self.get_parameter('reach_threshold').value
-        if self.planner.reached(self.last_end_pose, waypoint, reach_thresh):
+        # 如果还没有启动这个阶段的运动，则发送初始命令
+        if not self.stage_motion_started:
+            self._publish_cart_target(waypoint)
+            self.stage_motion_started = True
+            self.last_cmd_time = datetime.now()
             self.get_logger().info(
-                f'{self.current_stage} 已到达，切换到 {next_state}')
-            self._transition(next_state)
-            if next_state == 'DONE':
-                return
-            # 为下一阶段更新 current_stage
-            stage_map = {
-                'MOVE_DESCEND': 'MOVE_DESCEND',
-                'CLOSE_GRIPPER': 'CLOSE_GRIPPER',
-                'MOVE_LIFT': 'MOVE_LIFT',
-                'MOVE_RETREAT': 'MOVE_RETREAT',
-            }
-            self.current_stage = stage_map.get(next_state, self.current_stage)
+                f'{self.current_stage} 启动运动，目标: '
+                f'({waypoint[0]:.3f}, {waypoint[1]:.3f}, {waypoint[2]:.3f})')
             return
 
-        # 限幅步长并下发
-        step_size = self._stage_step_size()
-        step_target = self.planner.limit_step(
-            self.last_end_pose, waypoint, step_size)
+        # 检查是否已到位（使用 position_tolerance）
+        pos_tol = self.get_parameter('position_tolerance_m').value
+        dx = self.last_end_pose[0] - waypoint[0]
+        dy = self.last_end_pose[1] - waypoint[1]
+        dz = self.last_end_pose[2] - waypoint[2]
+        distance = (dx * dx + dy * dy + dz * dz) ** 0.5
+        
+        if not self.stage_settled and distance > pos_tol:
+            # 未到位，周期性检查，但不继续发送命令（等执行层反馈）
+            self.get_logger().debug(
+                f'{self.current_stage} 运动中... 距离: {distance:.4f} m')
+            return
 
-        self._publish_cart_target(step_target)
-        self.last_cmd_target = step_target
-        self.last_cmd_time = datetime.now()
+        # 已到位，进入稳定阶段
+        if not self.stage_settled:
+            self.stage_settled = True
+            settle_sec = self.get_parameter('settle_time_sec').value
+            self.stage_settle_until = datetime.now() + timedelta(seconds=settle_sec)
+            self.get_logger().info(
+                f'{self.current_stage} 已到位，等待稳定 {settle_sec:.1f} 秒')
+            return
+
+        # 检查稳定停留时间
+        if self.stage_settle_until and datetime.now() >= self.stage_settle_until:
+            self.get_logger().info(
+                f'{self.current_stage} 完成，切换到 {next_state}')
+            
+            # 重置阶段状态
+            self.stage_motion_started = False
+            self.stage_settled = False
+            self.stage_settle_until = None
+            
+            self._transition(next_state)
+            
+            # 为下一阶段更新 current_stage
+            if next_state != 'DONE':
+                stage_map = {
+                    'MOVE_DESCEND': 'MOVE_DESCEND',
+                    'CLOSE_GRIPPER': 'CLOSE_GRIPPER',
+                    'MOVE_LIFT': 'MOVE_LIFT',
+                    'MOVE_RETREAT': 'MOVE_RETREAT',
+                }
+                self.current_stage = stage_map.get(next_state, self.current_stage)
 
     def _handle_close_gripper(self):
         """CLOSE_GRIPPER：闭合夹爪并等待稳定。"""
@@ -369,6 +417,8 @@ class GraspTaskOpenLoop(Node):
                 f'夹爪稳定完成，抬升目标: ({self.lift_target[0]:.3f}, '
                 f'{self.lift_target[1]:.3f}, {self.lift_target[2]:.3f})')
             self.current_stage = 'MOVE_LIFT'
+            self.stage_motion_started = False
+            self.stage_settled = False
             self._transition('MOVE_LIFT')
 
     def _handle_recovery(self):
@@ -439,11 +489,28 @@ class GraspTaskOpenLoop(Node):
         self.gripper_settle_until = None
         self.lift_target = None
         self.joint6_compensated = False
+        self.command_in_flight = False
+        self.stage_motion_started = False
+        self.stage_settled = False
+        self.stage_settle_until = None
         self.filter.history.clear()
 
     # ------------------------------------------------------------------
     # 指令发布
     # ------------------------------------------------------------------
+
+    def _set_speed_profile(self, profile: str):
+        """设置执行层速度档位: 'slow' 或 'default'。"""
+        if self.speed_profile_active == profile:
+            return
+        
+        self.speed_profile_active = profile
+        msg = String()
+        msg.data = profile
+        self.get_logger().info(f'切换速度档位: {profile}')
+        # 发布到一个假想的速度控制 topic（实际可能需要适配）
+        # 如果没有独立的速度 topic，可以通过夹爪或其他 topic 携带
+        # 这里先留作示例，实际集成时根据 executor 接口适配
 
     def _publish_cart_target(self, xyz: list):
         """发布 Cartesian 步进指令到执行层。"""
