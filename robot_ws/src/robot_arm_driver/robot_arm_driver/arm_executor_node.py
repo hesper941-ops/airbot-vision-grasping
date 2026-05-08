@@ -25,13 +25,17 @@ class ArmExecutorNode(Node):
         self.declare_parameter('do_init', True)
         self.declare_parameter('init_joint_pos_deg', [0.0, -45.0, 120.0, -90.0, 90.0, 90.0])
 
-        # ---- 连接机械臂 ----
+        # ---- 连接机械臂（慢速启动，初始化后再切快速） ----
         self.arm = AirbotWrapper(url='localhost', port=50001)
-        self.arm.connect(speed_profile='default')
+        self.arm.connect(speed_profile='slow')
 
-        # 启动时自动走到初始工作位姿（可配置关闭）
+        # 启动时自动走到初始工作位姿（慢速，可配置关闭）
         if self.get_parameter('do_init').value:
             self._move_to_init_pose()
+
+        # 初始位姿完成后切换到快速，供后续抓取动作使用
+        self.arm.set_speed_profile('default')
+        self.get_logger().info('初始化完成，已切换到默认速度')
 
         self.sdk_lock = threading.Lock()
         self.last_state_msg = None
@@ -69,10 +73,16 @@ class ArmExecutorNode(Node):
             self.gripper_callback,
             10
         )
+        self.speed_sub = self.create_subscription(
+            String,
+            '/robot_arm/speed_profile',
+            self.speed_callback,
+            10
+        )
 
         self.get_logger().info('ArmExecutorNode 启动完毕（唯一硬件 owner）。')
         self.get_logger().info('发布: /robot_arm/joint_state (ArmJointState) + /robot_arm/end_pose (PoseStamped)')
-        self.get_logger().info('监听: /robot_arm/target_joint, /robot_arm/cart_target, /robot_arm/gripper_cmd')
+        self.get_logger().info('监听: /robot_arm/target_joint, /robot_arm/cart_target, /robot_arm/gripper_cmd, /robot_arm/speed_profile')
 
     def _deg2rad(self, deg: float) -> float:
         return deg * math.pi / 180.0
@@ -119,6 +129,16 @@ class ArmExecutorNode(Node):
             self.get_logger().error(f'Unknown gripper command: {command}')
             return
         self._enqueue_command('gripper', command)
+
+    def speed_callback(self, msg):
+        """运行时切换速度档（slow / default / fast）。"""
+        profile = msg.data.strip().lower()
+        if profile not in ('slow', 'default', 'fast'):
+            self.get_logger().error(f'未知速度档: {profile}')
+            return
+        with self.sdk_lock:
+            self.arm.set_speed_profile(profile)
+        self.get_logger().info(f'速度档切换为: {profile}')
 
     def publish_state(self):
         """发布 ArmJointState + PoseStamped，给任务层和坐标变换用。"""

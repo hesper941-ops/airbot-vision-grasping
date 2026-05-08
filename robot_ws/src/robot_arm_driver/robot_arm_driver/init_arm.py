@@ -21,7 +21,7 @@ def main():
 
     robot = AirbotWrapper(url="localhost", port=50001)
     try:
-        robot.connect(speed_profile='default')
+        robot.connect(speed_profile='slow')
         robot.move_joints(initial_joint_pos)
         time.sleep(1.0)
         print("Robot arm has moved to the initial position.")
