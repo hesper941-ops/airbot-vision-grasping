@@ -47,6 +47,7 @@ def generate_launch_description():
         executable='visual_target_bridge',
         name='visual_target_bridge',
         output='screen',
+        parameters=[LaunchConfiguration('config_file')],
     )
 
     open_loop_node = Node(

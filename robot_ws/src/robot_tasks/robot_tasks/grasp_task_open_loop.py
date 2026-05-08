@@ -162,83 +162,96 @@ class GraspTaskOpenLoop(Node):
     # ==================================================================
 
     def target_callback(self, msg: VisualTarget):
-        """接收视觉目标，校验后更新状态机。"""
-        frame_id = msg.header.frame_id.strip()
-        if frame_id and frame_id != 'base_link':
-            self.get_logger().error(
-                f'frame_id 不匹配: {frame_id}，期望 base_link')
-            return
+        """Receive visual target, validate it, and update the task state."""
+        try:
+            frame_id = msg.header.frame_id.strip()
+            if frame_id and frame_id != 'base_link':
+                self.get_logger().error(
+                    f'frame_id mismatch: {frame_id}, expected base_link')
+                return
 
-        if not self.filter.in_workspace(msg.x, msg.y, msg.z):
-            self.get_logger().error(
-                f'目标超出工作空间: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f})')
-            return
+            if not self.filter.in_workspace(msg.x, msg.y, msg.z):
+                self.get_logger().error(
+                    f'Target out of workspace: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f})')
+                return
 
-        self.latest_target = msg
-        self.filter.update_history(msg)
+            self.latest_target = msg
+            self.filter.update_history(msg)
 
-        if not self.filter.has_any_confidence(msg):
-            self.get_logger().warning(
-                f'目标置信度过低 ({msg.confidence:.2f})，等待更优输入')
-            return
+            if not self.filter.has_any_confidence(msg):
+                self.get_logger().warning(
+                    f'Target confidence too low ({msg.confidence:.2f}), waiting for better input')
+                return
 
-        self.get_logger().info(
-            f'收到目标: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f}) '
-            f'confidence={msg.confidence:.2f} stable={msg.is_stable}')
+            self.get_logger().info(
+                f'Received target: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f}) '
+                f'confidence={msg.confidence:.2f} stable={msg.is_stable}')
 
-        # 空闲或等待目标时，收到有效目标就开始规划
-        if self.task_state in ('IDLE', 'WAIT_TARGET'):
-            self.task_state = 'PLAN_OPEN_LOOP'
+            if self.task_state in ('IDLE', 'WAIT_TARGET'):
+                self._transition('PLAN_OPEN_LOOP')
+            else:
+                self.get_logger().info(
+                    f'目标接收于忙碌状态 {self.task_state}，仅缓存不转换')
+        except Exception as e:
+            self.get_logger().error(f'target_callback exception: {e}', exc_info=True)
 
     def state_callback(self, msg: ArmJointState):
-        """存储最新的机械臂末端位姿和关节角。"""
-        if msg.end_pose and len(msg.end_pose) >= 3:
-            self.last_end_pose = [msg.end_pose[0],
-                                  msg.end_pose[1],
-                                  msg.end_pose[2]]
-        if msg.joint_pos and len(msg.joint_pos) >= 6:
-            self.last_joint_pos = list(msg.joint_pos)
+        """Store the latest arm end pose and joint positions."""
+        try:
+            if msg.end_pose and len(msg.end_pose) >= 3:
+                self.last_end_pose = [msg.end_pose[0],
+                                      msg.end_pose[1],
+                                      msg.end_pose[2]]
+            if msg.joint_pos and len(msg.joint_pos) >= 6:
+                self.last_joint_pos = list(msg.joint_pos)
+        except Exception as e:
+            self.get_logger().error(f'state_callback exception: {e}', exc_info=True)
 
     # ==================================================================
     # 主状态机
     # ==================================================================
 
     def step_loop(self):
-        """定时器驱动的状态机主循环。"""
-        if self.task_state == 'IDLE':
-            self._transition('WAIT_TARGET')
+        """Timer-driven state machine main loop."""
+        try:
+            if self.task_state == 'IDLE':
+                self._transition('WAIT_TARGET')
 
-        elif self.task_state == 'WAIT_TARGET':
-            pass  # 等待 target_callback 触发
+            elif self.task_state == 'WAIT_TARGET':
+                pass  # wait for target_callback to trigger
 
-        elif self.task_state == 'PLAN_OPEN_LOOP':
-            self._handle_plan_open_loop()
+            elif self.task_state == 'PLAN_OPEN_LOOP':
+                self._handle_plan_open_loop()
 
-        elif self.task_state == 'MOVE_PRE_GRASP':
-            self._handle_move_stage('MOVE_DESCEND')
+            elif self.task_state == 'MOVE_PRE_GRASP':
+                self._handle_move_stage('MOVE_DESCEND')
 
-        elif self.task_state == 'MOVE_DESCEND':
-            self._handle_move_stage('CLOSE_GRIPPER')
+            elif self.task_state == 'MOVE_DESCEND':
+                self._handle_move_stage('CLOSE_GRIPPER')
 
-        elif self.task_state == 'CLOSE_GRIPPER':
-            self._handle_close_gripper()
+            elif self.task_state == 'CLOSE_GRIPPER':
+                self._handle_close_gripper()
 
-        elif self.task_state == 'MOVE_LIFT':
-            self._handle_move_stage('MOVE_RETREAT')
+            elif self.task_state == 'MOVE_LIFT':
+                self._handle_move_stage('MOVE_RETREAT')
 
-        elif self.task_state == 'MOVE_RETREAT':
-            self._handle_move_stage('DONE')
+            elif self.task_state == 'MOVE_RETREAT':
+                self._handle_move_stage('DONE')
 
-        elif self.task_state == 'DONE':
-            self.get_logger().info('抓取流程完成，返回 IDLE')
-            self._reset_task()
-            self._transition('IDLE')
+            elif self.task_state == 'DONE':
+                self.get_logger().info('抓取流程完成，返回 IDLE')
+                self._reset_task()
+                self._transition('IDLE')
 
-        elif self.task_state == 'RECOVERY':
-            self._handle_recovery()
+            elif self.task_state == 'RECOVERY':
+                self._handle_recovery()
 
-        elif self.task_state == 'ABORT':
-            self.get_logger().error('任务中止，返回 WAIT_TARGET')
+            elif self.task_state == 'ABORT':
+                self.get_logger().error('任务中止，返回 WAIT_TARGET')
+                self._reset_task()
+                self._transition('WAIT_TARGET')
+        except Exception as e:
+            self.get_logger().error(f'step_loop exception: {e}', exc_info=True)
             self._reset_task()
             self._transition('WAIT_TARGET')
 
@@ -419,6 +432,7 @@ class GraspTaskOpenLoop(Node):
         """重置任务运行时变量，准备下一次抓取。"""
         self.current_stage = None
         self.accepted_target = None
+        self.latest_target = None
         self.last_cmd_target = None
         self.last_cmd_time = None
         self.gripper_closed = False
@@ -467,7 +481,8 @@ def main(args=None):
         pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

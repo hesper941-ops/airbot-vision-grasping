@@ -11,6 +11,24 @@ arm_executor_node:
     do_init: true
     init_joint_pos_deg: [0.0, -45.0, 120.0, -90.0, 90.0, 90.0]
 
+visual_target_bridge:
+  ros__parameters:
+    image_width: 640
+    image_height: 480
+    expected_camera_frame: camera_color_optical_frame
+    min_depth_m: 0.05
+    max_depth_m: 1.50
+    max_camera_jump_m: 0.35
+    max_base_jump_m: 0.60
+    debug_log: true
+    handeye:
+      # OpenCV calibrateHandEye output named cam2gripper: ^gT_c.
+      # If validation proves the saved matrix is actually ^cT_g, switch
+      # direction to gripper_to_camera without changing code.
+      direction: camera_to_gripper
+      translation: [-0.0830395307186257, 0.008112286716840913, 0.08580828291231507]
+      quaternion_xyzw: [-0.49270434706957716, 0.5001884081237661, -0.49995706645552335, 0.5070472507158893]
+
 # ---- 任务层：开环抓取 ----
 grasp_task_open_loop:
   ros__parameters:
