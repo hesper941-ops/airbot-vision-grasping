@@ -3,7 +3,7 @@ import queue
 import threading
 
 import rclpy
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray, String
 
@@ -35,6 +35,7 @@ class ArmExecutorNode(Node):
 
         self.sdk_lock = threading.Lock()
         self.last_state_msg = None
+        self.last_pose_msg = None
 
         # Keep command execution off the ROS callback thread so state publishing
         # can stay responsive while a motion command is running inside the SDK.
@@ -43,7 +44,11 @@ class ArmExecutorNode(Node):
         self.worker = threading.Thread(target=self._command_worker, daemon=True)
         self.worker.start()
 
+        # 两套状态 topic：
+        # - ArmJointState：给任务节点（grasp_task_*）做到位判断
+        # - PoseStamped：给 camera_to_base_transform 做手眼矩阵运算（需要四元数）
         self.state_pub = self.create_publisher(ArmJointState, '/robot_arm/joint_state', 10)
+        self.end_pose_pub = self.create_publisher(PoseStamped, '/robot_arm/end_pose', 10)
         self.state_timer = self.create_timer(0.1, self.publish_state)
 
         self.joint_sub = self.create_subscription(
@@ -65,9 +70,9 @@ class ArmExecutorNode(Node):
             10
         )
 
-        self.get_logger().info('ArmExecutorNode started as the single hardware owner.')
-        self.get_logger().info('Publishing: /robot_arm/joint_state')
-        self.get_logger().info('Listening: /robot_arm/target_joint, /robot_arm/cart_target, /robot_arm/gripper_cmd')
+        self.get_logger().info('ArmExecutorNode 启动完毕（唯一硬件 owner）。')
+        self.get_logger().info('发布: /robot_arm/joint_state (ArmJointState) + /robot_arm/end_pose (PoseStamped)')
+        self.get_logger().info('监听: /robot_arm/target_joint, /robot_arm/cart_target, /robot_arm/gripper_cmd')
 
     def _deg2rad(self, deg: float) -> float:
         return deg * math.pi / 180.0
@@ -116,25 +121,45 @@ class ArmExecutorNode(Node):
         self._enqueue_command('gripper', command)
 
     def publish_state(self):
-        """Publish the latest arm state for task-level feedback loops."""
+        """发布 ArmJointState + PoseStamped，给任务层和坐标变换用。"""
         if not self.sdk_lock.acquire(blocking=False):
+            # SDK 正忙（在执行命令），发缓存副本
             if self.last_state_msg is not None:
                 busy_msg = self._copy_state_msg(self.last_state_msg)
                 busy_msg.state = 'BUSY'
                 self.state_pub.publish(busy_msg)
+            if self.last_pose_msg is not None:
+                self.end_pose_pub.publish(self.last_pose_msg)
             return
 
         try:
+            # ---- ArmJointState ----
             msg = ArmJointState()
             msg.state = str(self.arm.get_state())
             msg.joint_pos = list(self.arm.get_joint_pos())
             msg.joint_vel = list(self.arm.get_joint_vel())
 
             end_pose = self.arm.get_end_pose()
-            msg.end_pose = list(end_pose[0]) + list(end_pose[1])
+            position = list(end_pose[0])
+            quaternion = list(end_pose[1])
+            msg.end_pose = position + quaternion
 
             self.last_state_msg = self._copy_state_msg(msg)
             self.state_pub.publish(msg)
+
+            # ---- PoseStamped（给 camera_to_base_transform） ----
+            pose_msg = PoseStamped()
+            pose_msg.header.stamp = self.get_clock().now().to_msg()
+            pose_msg.header.frame_id = 'base_link'
+            pose_msg.pose.position.x = float(position[0])
+            pose_msg.pose.position.y = float(position[1])
+            pose_msg.pose.position.z = float(position[2])
+            pose_msg.pose.orientation.x = float(quaternion[0])
+            pose_msg.pose.orientation.y = float(quaternion[1])
+            pose_msg.pose.orientation.z = float(quaternion[2])
+            pose_msg.pose.orientation.w = float(quaternion[3])
+            self.last_pose_msg = pose_msg
+            self.end_pose_pub.publish(pose_msg)
         except Exception as e:
             self.get_logger().error(f'Failed to publish arm state: {e}')
         finally:
