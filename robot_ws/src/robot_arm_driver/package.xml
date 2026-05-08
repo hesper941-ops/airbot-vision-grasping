@@ -9,6 +9,7 @@
 
   <depend>rclpy</depend>
   <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
   <depend>robot_arm_interface</depend>
   <depend>robot_msgs</depend>
 

@@ -86,8 +86,10 @@ AIRBOT SDK 的统一 Python 封装层。
 用途：
 
 - 接收视觉侧给出的 base 坐标目标点
-- 做工作空间检查
-- 通过机械臂命令层触发执行
+- 读取目标置信度和稳定性
+- 规划候选小步路径
+- 只向执行层下发第一小步
+- 等待新的视觉反馈后再决定下一步
 
 ### 2.4 robot_msgs
 
@@ -100,6 +102,7 @@ AIRBOT SDK 的统一 Python 封装层。
 - `GripperCommand.msg`
 - `ArmCommand.msg`
 - `ArmState.msg`
+- `CameraTarget.msg`
 
 ### 2.5 robot_bringup
 
@@ -234,11 +237,13 @@ ros2 launch robot_bringup camera_target_demo.launch.py
 
 ### 6.6 手动发送目标点
 
+当前视觉目标消息已改为 `robot_msgs/msg/CameraTarget`，建议使用下面格式：
+
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/sunrise/robot/robot_ws/install/setup.bash
-ros2 topic pub --once /camera_target_base geometry_msgs/msg/PointStamped \
-"{header: {frame_id: 'base_link'}, point: {x: 0.35, y: 0.00, z: 0.20}}"
+ros2 topic pub --once /camera_target_base robot_msgs/msg/CameraTarget \
+"{header: {frame_id: 'base_link'}, x: 0.35, y: 0.00, z: 0.20, confidence: 0.85, target_id: 'obj1', object_name: 'apple', is_stable: true, estimated_gripper_width: 0.06}"
 ```
 
 ---
@@ -253,17 +258,20 @@ ros2 topic pub --once /camera_target_base geometry_msgs/msg/PointStamped \
 ### 7.2 机械臂命令输入
 
 - `/robot_arm/cmd`
+- `/robot_arm/cart_target`（本地笛卡尔小步命令，`PointStamped`）
+- `/robot_arm/gripper_cmd`（夹爪开/关指令，`std_msgs/String`）
 
 ### 7.3 视觉目标输入
 
-- `/camera_target_base`
+- `/camera_target_base`（`robot_msgs/msg/CameraTarget`）
 
 当前 `camera_target_executor` 的目标是先完成：
 
-- 接收 base 坐标点
+- 接收视觉侧给出的 base 坐标目标，并读取置信度
 - 做工作空间检查
-- 下发移动命令
-- 返回执行成功 / 失败状态
+- 规划一段候选小步路径
+- 只下发第一个小步到执行层
+- 等待新的视觉反馈后再决定下一步
 
 ---
 
@@ -275,7 +283,9 @@ ros2 topic pub --once /camera_target_base geometry_msgs/msg/PointStamped \
 - `AirbotWrapper` 的统一接口封装
 - `/robot_arm/end_pose` 发布
 - `init_arm` / `sleep_arm` 基础动作脚本
-- `camera_target_executor` 最小目标点执行链
+- `camera_target_executor` 已重构为纯任务节点，向执行层发布 `/robot_arm/cart_target`
+- 新增 `robot_msgs/CameraTarget.msg`，统一视觉目标格式
+- 新增 `cart_move_node.py`，执行层负责笛卡尔小步移动
 - 统一消息接口的第一轮整理
 - `arm_executor_node` 单节点执行模式的引入
 
@@ -294,25 +304,18 @@ ros2 topic pub --once /camera_target_base geometry_msgs/msg/PointStamped \
    - 成为唯一硬件 owner
    - 统一发布状态与末端位姿
 
-3. 继续改造任务层
-   - `camera_target_executor` 彻底转成纯任务节点
-   - 不再直接碰 SDK
+3. 继续增强任务层
+   - 完善 `camera_target_executor` 的阶段机
+   - 支持 `PREGRASP / ALIGN / FINAL_APPROACH / CLOSE_GRIPPER / LIFT / RETREAT`
+   - 基于置信度、目标漂移、视觉稳定性做决策
 
-4. 补完整抓取状态机
-   - `IDLE`
-   - `WAIT_TARGET`
-   - `VALIDATE_TARGET`
-   - `MOVE_PREGRASP`
-   - `ROTATE_J6`
-   - `DESCEND`
-   - `CLOSE_GRIPPER`
-   - `LIFT`
-   - `RETREAT`
-   - `ERROR_RECOVERY`
+4. 明确视觉侧目标接口
+   - `/camera_target_base` 使用 `robot_msgs/CameraTarget`
+   - 支持 `confidence`、`is_stable`、`target_id` 等字段
 
-5. 再与视觉侧统一接口
-   - 统一目标消息
-   - 支持置信度 / 夹爪宽度 / 稳定性等字段
+5. 继续保持执行层唯一性
+   - 所有真实动作下发到 `robot_arm_driver`
+   - 任务层只发布命令、读取状态，不直接调用 SDK
 
 ---
 

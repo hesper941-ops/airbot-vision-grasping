@@ -1,0 +1,9 @@
+std_msgs/Header header
+float64 x
+float64 y
+float64 z
+float64 confidence
+string target_id
+string object_name
+bool is_stable
+float64 estimated_gripper_width
