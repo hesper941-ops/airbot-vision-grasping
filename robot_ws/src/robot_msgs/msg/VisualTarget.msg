@@ -1,0 +1,13 @@
+std_msgs/Header header
+string target_id
+string object_name
+float64 x
+float64 y
+float64 z
+float64 confidence
+bool is_stable
+float64 u
+float64 v
+float64 depth
+int32 image_width
+int32 image_height

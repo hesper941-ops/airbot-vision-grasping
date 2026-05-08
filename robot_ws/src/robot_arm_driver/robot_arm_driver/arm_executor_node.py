@@ -21,7 +21,7 @@ class ArmExecutorNode(Node):
         super().__init__('arm_executor_node')
 
         self.arm = AirbotWrapper(url='localhost', port=50001)
-        self.arm.connect(speed_profile='slow')
+        self.arm.connect(speed_profile='default')
 
         self.sdk_lock = threading.Lock()
         self.last_state_msg = None

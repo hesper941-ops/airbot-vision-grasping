@@ -10,6 +10,7 @@ rosidl_generate_interfaces(${PROJECT_NAME}
   "msg/ArmJointState.msg"
   "msg/GripperCommand.msg"
   "msg/CameraTarget.msg"
+  "msg/VisualTarget.msg"
   DEPENDENCIES std_msgs
 )
 

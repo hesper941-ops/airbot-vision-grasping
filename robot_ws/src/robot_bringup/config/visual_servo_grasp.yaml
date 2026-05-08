@@ -1,0 +1,63 @@
+# ===================================================================
+# 方案二：视觉伺服抓取参数配置
+#
+# 适用节点：grasp_task_visual_servo
+# 策略：粗定位（同方案一） + 眼在手上视觉闭环微调 + 抓取
+# ===================================================================
+
+grasp_task_visual_servo:
+  ros__parameters:
+    # ---- 粗定位阶段参数（与方案一共用） ----
+    pre_grasp_z_offset: 0.12
+    grasp_z_offset: 0.0
+    lift_z_offset: 0.10
+
+    # ---- 置信度阈值 ----
+    min_confidence_start: 0.7
+    confidence_low: 0.3
+
+    # ---- 粗定位阶段稳定性 ----
+    stable_count_required: 3
+    drift_threshold: 0.05
+
+    # ---- 工作空间 ----
+    workspace_limits:
+      x_min: 0.10
+      x_max: 1.00
+      y_min: -0.45
+      y_max: 0.50
+      z_min: 0.02
+      z_max: 0.70
+
+    # ---- 安全撤退位姿 ----
+    safe_pose: [0.35, 0.0, 0.35]
+
+    # ---- Joint6 末端补偿（度） ----
+    joint6_compensation_deg: 90.0
+
+    # ---- 粗定位步长（米） ----
+    coarse_step: 0.10
+
+    # ---- 视觉伺服闭环参数 ----
+    servo_gain_k: 0.0003              # 像素→米 比例系数
+    servo_max_step: 0.015             # 单次伺服修正最大步长（米）
+    servo_dead_zone_u: 5.0            # u 方向死区（像素）
+    servo_dead_zone_v: 5.0            # v 方向死区（像素）
+    servo_threshold_u: 3.0            # u 方向稳定阈值（像素）
+    servo_threshold_v: 3.0            # v 方向稳定阈值（像素）
+    servo_stable_count_required: 5    # 连续稳定帧数，达标后允许下降
+    servo_history_size: 20            # 像素历史缓冲区大小
+    servo_z_descend_step: 0.03        # 最终下降 Z 步长（米）
+
+    # ---- 下降 / 抬升 / 撤退步长（米） ----
+    descend_step: 0.03
+    lift_step: 0.08
+    retreat_step: 0.10
+
+    # ---- 到达判定与夹爪 ----
+    reach_threshold: 0.03
+    gripper_settle_sec: 1.0
+
+    # ---- 超时与频率 ----
+    cmd_timeout_sec: 10.0
+    loop_hz: 4

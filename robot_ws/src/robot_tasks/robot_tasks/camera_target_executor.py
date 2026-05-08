@@ -31,7 +31,10 @@ class CameraTargetExecutor(Node):
         self.last_command_target = None
         self.last_command_time = None
         self.gripper_closed = False
+        self.gripper_settle_until = None
+        self.lift_target = None
         self.wait_timeout = timedelta(seconds=10)
+        self.gripper_settle_time = timedelta(seconds=1)
 
         # Simple Cartesian workspace limits for incoming visual targets
         self.x_min = 0.10
@@ -46,7 +49,15 @@ class CameraTargetExecutor(Node):
         self.confidence_low = 0.3
         self.drift_threshold = 0.05
         self.stable_count_required = 3
-        self.max_cartesian_step = 0.05
+
+        # Stage-specific step sizes: fast when far, careful near contact.
+        self.pregrasp_step = 0.10
+        self.align_step = 0.07
+        self.final_approach_step = 0.03
+        self.lift_step = 0.08
+        self.retreat_step = 0.10
+        self.post_grasp_lift = 0.10
+        self.safe_retreat_pose = [0.35, 0.00, 0.35]
 
         # Subscribe to vision target and arm state
         self.target_sub = self.create_subscription(
@@ -76,7 +87,7 @@ class CameraTargetExecutor(Node):
             10
         )
 
-        self.timer = self.create_timer(0.5, self.step_loop)
+        self.timer = self.create_timer(0.25, self.step_loop)
 
         self.get_logger().info('CameraTargetExecutor started.')
         self.get_logger().info('Subscribed topic: /camera_target_base')
@@ -143,6 +154,12 @@ class CameraTargetExecutor(Node):
             self.evaluate_visual_update()
             return
 
+        if self.task_state == 'WAIT_GRIPPER_SETTLE':
+            if self.gripper_settle_until and datetime.now() >= self.gripper_settle_until:
+                self.current_stage = 'LIFT'
+                self.task_state = 'PLAN_PATH'
+            return
+
         if self.task_state == 'REPLAN':
             self.get_logger().info('Replanning based on latest visual input.')
             self.current_stage = None
@@ -161,23 +178,28 @@ class CameraTargetExecutor(Node):
             self.task_state = 'WAIT_TARGET'
             return
 
-        if not self._is_target_stable():
+        post_grasp_stage = self.current_stage in ['LIFT', 'RETREAT']
+
+        if not post_grasp_stage and not self._is_target_stable():
             self.get_logger().info('Target not yet stable, waiting for more visual updates.')
             self.task_state = 'WAIT_TARGET'
             return
 
-        if self.latest_target.confidence < self.confidence_low:
+        if not post_grasp_stage and self.latest_target.confidence < self.confidence_low:
             self.get_logger().warning('Target confidence too low for planning.')
             self.task_state = 'WAIT_TARGET'
             return
 
-        if self.current_target is None or self._target_drift(self.current_target, self.latest_target) > self.drift_threshold:
+        if not post_grasp_stage and (
+            self.current_target is None or
+            self._target_drift(self.current_target, self.latest_target) > self.drift_threshold
+        ):
             self.current_target = self.latest_target
             self.current_stage = 'PREGRASP'
             self.get_logger().info('Accepted new target and reset stage to PREGRASP.')
 
         step_target = self._choose_next_step(self.current_target)
-        if self.task_state == 'WAIT_TARGET':
+        if self.task_state != 'PLAN_PATH':
             return
         if step_target is None:
             self.get_logger().info('Current target reached or no step required.')
@@ -197,7 +219,11 @@ class CameraTargetExecutor(Node):
 
         if self.last_end_pose is not None and self._distance(self.last_end_pose, self.last_command_target) < 0.04:
             self.get_logger().info('Observed robot reached the last commanded step.')
-            if self.current_stage == 'FINAL_APPROACH':
+            if self.current_stage == 'RETREAT':
+                self.get_logger().info('RETREAT reached, grasp sequence finished.')
+                self.reset_task()
+                return
+            elif self.current_stage == 'FINAL_APPROACH':
                 self.current_stage = 'CLOSE_GRIPPER'
             else:
                 self.current_stage = self._next_stage(self.current_stage)
@@ -211,17 +237,22 @@ class CameraTargetExecutor(Node):
                 self.task_state = 'ABORT'
             return
 
-        if self._target_drift(self.current_target, self.latest_target) > self.drift_threshold:
+        if (
+            self.current_stage not in ['LIFT', 'RETREAT'] and
+            self._target_drift(self.current_target, self.latest_target) > self.drift_threshold
+        ):
             self.get_logger().warning('Target drift too large, replanning.')
             self.task_state = 'REPLAN'
             return
 
-        if self.latest_target.confidence < self.confidence_low:
+        post_grasp_stage = self.current_stage in ['LIFT', 'RETREAT']
+
+        if not post_grasp_stage and self.latest_target.confidence < self.confidence_low:
             self.get_logger().warning('Confidence dropped after step, waiting for better input.')
             self.task_state = 'WAIT_TARGET'
             return
 
-        if self.latest_target.confidence < self.confidence_high:
+        if not post_grasp_stage and self.latest_target.confidence < self.confidence_high:
             self.get_logger().info('Medium confidence, delaying next step until better visual feedback.')
             self.task_state = 'WAIT_TARGET'
             return
@@ -233,25 +264,26 @@ class CameraTargetExecutor(Node):
             return None
 
         current = self.last_end_pose
-        pregrasp = [target.x, target.y, target.z + 0.12]
-        align = [target.x, target.y, target.z + 0.06]
-        final = [target.x, target.y, target.z]
+        pregrasp = self._clamp_workspace_target([target.x, target.y, target.z + 0.12])
+        align = self._clamp_workspace_target([target.x, target.y, target.z + 0.06])
+        final = self._clamp_workspace_target([target.x, target.y, target.z])
+        retreat = self._clamp_workspace_target(self.safe_retreat_pose)
 
         if self.current_stage == 'PREGRASP':
             if self._distance(current, pregrasp) > 0.03:
-                return self._limit_step(current, pregrasp)
+                return self._limit_step(current, pregrasp, self.pregrasp_step)
             self.get_logger().info('PREGRASP reached, moving to ALIGN stage.')
             self.current_stage = 'ALIGN'
 
         if self.current_stage == 'ALIGN':
             if self._distance(current, align) > 0.03:
-                return self._limit_step(current, align)
+                return self._limit_step(current, align, self.align_step)
             self.get_logger().info('ALIGN reached, moving to FINAL_APPROACH stage.')
             self.current_stage = 'FINAL_APPROACH'
 
         if self.current_stage == 'FINAL_APPROACH':
             if self._distance(current, final) > 0.02:
-                return self._limit_step(current, final)
+                return self._limit_step(current, final, self.final_approach_step)
             self.get_logger().info('FINAL_APPROACH reached, target is in contact region.')
             return None
 
@@ -259,28 +291,58 @@ class CameraTargetExecutor(Node):
             if not self.gripper_closed:
                 self.publish_gripper_command('close')
                 self.gripper_closed = True
-                self.get_logger().info('Gripper close command published, task complete.')
+                self.gripper_settle_until = datetime.now() + self.gripper_settle_time
+                self.task_state = 'WAIT_GRIPPER_SETTLE'
+                self.get_logger().info('Gripper close command published, waiting before lift.')
+            return None
+
+        if self.current_stage == 'LIFT':
+            if self.lift_target is None:
+                self.lift_target = [
+                    current[0],
+                    current[1],
+                    min(current[2] + self.post_grasp_lift, self.z_max),
+                ]
+                self.lift_target = self._clamp_workspace_target(self.lift_target)
+            lift = self.lift_target
+            if self._distance(current, lift) > 0.03:
+                return self._limit_step(current, lift, self.lift_step)
+            self.get_logger().info('LIFT reached, moving to RETREAT stage.')
+            self.current_stage = 'RETREAT'
+
+        if self.current_stage == 'RETREAT':
+            if self._distance(current, retreat) > 0.04:
+                return self._limit_step(current, retreat, self.retreat_step)
+            self.get_logger().info('RETREAT reached, grasp sequence finished.')
             self.reset_task()
             return None
 
         return None
 
-    def _limit_step(self, current, target):
+    def _limit_step(self, current, target, max_step):
         """Clamp a desired target to one small decision step."""
         distance = self._distance(current, target)
-        if distance <= self.max_cartesian_step:
+        if distance <= max_step:
             return target
 
-        ratio = self.max_cartesian_step / distance
+        ratio = max_step / distance
         step = [
             current[0] + (target[0] - current[0]) * ratio,
             current[1] + (target[1] - current[1]) * ratio,
             current[2] + (target[2] - current[2]) * ratio,
         ]
         self.get_logger().info(
-            f'Clamped cartesian step from {distance:.3f} m to {self.max_cartesian_step:.3f} m.'
+            f'Clamped {self.current_stage} step from {distance:.3f} m to {max_step:.3f} m.'
         )
         return step
+
+    def _clamp_workspace_target(self, target):
+        """Clamp planned helper targets into the same workspace used for vision input."""
+        return [
+            min(max(float(target[0]), self.x_min), self.x_max),
+            min(max(float(target[1]), self.y_min), self.y_max),
+            min(max(float(target[2]), self.z_min), self.z_max),
+        ]
 
     def publish_cart_step(self, step_target):
         """Publish one small Cartesian step command to the execution layer."""
@@ -331,6 +393,8 @@ class CameraTargetExecutor(Node):
             return 'FINAL_APPROACH'
         if current_stage == 'FINAL_APPROACH':
             return 'CLOSE_GRIPPER'
+        if current_stage == 'LIFT':
+            return 'RETREAT'
         return 'FINAL_APPROACH'
 
     def reset_task(self):
@@ -341,6 +405,8 @@ class CameraTargetExecutor(Node):
         self.last_command_target = None
         self.last_command_time = None
         self.gripper_closed = False
+        self.gripper_settle_until = None
+        self.lift_target = None
         self.target_history.clear()
 
 

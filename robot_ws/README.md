@@ -77,42 +77,119 @@ AIRBOT SDK 的统一 Python 封装层。
 
 ### 2.3 robot_tasks
 
-任务层节点，不应长期直接操作 SDK。
+任务层节点，不应直接操作 SDK，只通过 `/robot_arm/cart_target`、`/robot_arm/target_joint`、`/robot_arm/gripper_cmd` 等 topic 向执行层下发指令。
 
-当前已有：
+目录结构：
+```
+robot_tasks/
+├── camera_target_executor.py       # 旧版视觉目标执行器（保留）
+├── grasp_task_open_loop.py          # 方案一：开环抓取
+├── grasp_task_visual_servo.py       # 方案二：视觉伺服抓取
+└── shared/                          # 共用工具模块
+    ├── target_filter.py             # 目标过滤与验证
+    ├── grasp_planner.py             # 抓取路径点规划
+    └── servo_utils.py               # 视觉伺服计算
+```
 
-- `camera_target_executor.py`
+#### 方案一：grasp_task_open_loop（开环抓取）
 
-用途：
+一次识别 + 坐标转换 + 分阶段抓取，适合作为保底方案。
 
-- 接收视觉侧给出的 base 坐标目标点
-- 读取目标置信度和稳定性
-- 规划候选小步路径
-- 只向执行层下发第一小步
-- 等待新的视觉反馈后再决定下一步
+状态机：
+```
+IDLE → WAIT_TARGET → PLAN_OPEN_LOOP → MOVE_PRE_GRASP
+  → MOVE_DESCEND → CLOSE_GRIPPER → MOVE_LIFT → MOVE_RETREAT
+  → DONE → IDLE
+```
+
+特点：
+- 观察位识别目标后一次性规划所有路径点
+- safe → pre_grasp → grasp → lift → safe
+- 抓取前 joint6 固定 90° 补偿
+- pre_grasp 和 grasp 使用同一个补偿方向
+
+#### 方案二：grasp_task_visual_servo（视觉伺服抓取）
+
+粗定位 + 眼在手上视觉闭环微调，适合作为主力方案。
+
+状态机：
+```
+IDLE → WAIT_TARGET → PLAN_COARSE_PATH → MOVE_PRE_GRASP
+  → WAIT_SERVO_TARGET → SERVO_ALIGN → WAIT_AFTER_SERVO_STEP
+  → FINAL_DESCEND → CLOSE_GRIPPER → MOVE_LIFT → MOVE_RETREAT
+  → DONE → IDLE
+```
+
+特点：
+- 先用方案一逻辑粗定位到 pre_grasp
+- 到达后进入视觉闭环，根据像素误差 (u,v) 做小步修正
+- 步长限幅 + 死区 + 连续稳定帧判断
+- 连续 N 帧满足阈值后才允许下降抓取
+- 每步修正后必须等待新的 VisualTarget，不连续多步
 
 ### 2.4 robot_msgs
 
 机械臂相关统一消息定义。
 
-当前 / 规划中的消息包括：
+当前消息：
 
-- `ArmJointTarget.msg`
-- `ArmJointState.msg`
-- `GripperCommand.msg`
-- `ArmCommand.msg`
-- `ArmState.msg`
-- `CameraTarget.msg`
+- `ArmJointTarget.msg`       —— 关节目标指令（6 个 float64）
+- `ArmJointState.msg`        —— 关节状态（state, joint_pos, joint_vel, end_pose）
+- `GripperCommand.msg`       —— 夹爪指令（command, target_width, speed）
+- `CameraTarget.msg`         —— 相机目标（旧版，camera_target_executor 使用）
+- `VisualTarget.msg`         —— 统一视觉目标（新版，两个抓取任务节点共用）
+
+`VisualTarget.msg` 字段：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| header | std_msgs/Header | 时间戳与 frame_id（base_link） |
+| target_id | string | 目标 ID |
+| object_name | string | 物体类别名 |
+| x, y, z | float64 | base_link 系下 3D 坐标 |
+| confidence | float64 | 识别置信度 |
+| is_stable | bool | 视觉侧稳定性标志 |
+| u, v | float64 | 像素坐标 |
+| depth | float64 | 深度值（米） |
+| image_width | int32 | 图像宽度 |
+| image_height | int32 | 图像高度 |
+
+兼容原则：
+- 方案一主要使用 x, y, z, confidence
+- 方案二额外使用 u, v, depth, image_width, image_height, is_stable
 
 ### 2.5 robot_bringup
 
 负责不同模式下的启动组合，不写具体业务逻辑。
 
-当前常用 launch：
+目录结构：
+```
+robot_bringup/
+├── launch/
+│   ├── arm_bringup.launch.py            # 仅启动 arm_executor_node
+│   ├── camera_target_demo.launch.py     # 旧版 camera_target_executor 演示
+│   ├── open_loop_grasp.launch.py        # 方案一：开环抓取
+│   └── visual_servo_grasp.launch.py     # 方案二：视觉伺服抓取
+└── config/
+    ├── open_loop_grasp.yaml             # 方案一参数
+    └── visual_servo_grasp.yaml          # 方案二参数
+```
 
-- `arm_bringup.launch.py`
-- `camera_target_demo.launch.py`
-- `arm_executor_demo.launch.py`
+两种方案通过 launch 切换，不需要改底层代码：
+
+```bash
+# 方案一：开环抓取
+ros2 launch robot_bringup open_loop_grasp.launch.py
+
+# 方案二：视觉伺服抓取
+ros2 launch robot_bringup visual_servo_grasp.launch.py
+```
+
+可通过参数覆盖默认配置：
+
+```bash
+ros2 launch robot_bringup open_loop_grasp.launch.py config_file:=/path/to/my_config.yaml
+```
 
 ---
 
@@ -125,16 +202,15 @@ AIRBOT SDK 的统一 Python 封装层。
 这条链路用于当前重构中的机械臂侧开发。
 
 特点：
-
 - 直接连接 `airbot_server`
 - 用统一执行节点接收命令
 - 任务节点只发命令 / 读状态
+- **两种抓取方案可长期共存，只通过 launch 切换**
 
 推荐组成：
-
 - `airbot_server -i can1 -p 50001`
 - `arm_executor_node`
-- `camera_target_executor`
+- `grasp_task_open_loop`（方案一）或 `grasp_task_visual_servo`（方案二）
 
 ### 3.2 官方控制栈模式
 
@@ -252,26 +328,24 @@ ros2 topic pub --once /camera_target_base robot_msgs/msg/CameraTarget \
 
 ### 7.1 机械臂状态输出
 
-- `/robot_arm/state`
-- `/robot_arm/end_pose`
+| Topic | 类型 | 说明 |
+|-------|------|------|
+| `/robot_arm/joint_state` | `ArmJointState` | 关节状态 + 末端位姿（10 Hz） |
 
 ### 7.2 机械臂命令输入
 
-- `/robot_arm/cmd`
-- `/robot_arm/cart_target`（本地笛卡尔小步命令，`PointStamped`）
-- `/robot_arm/gripper_cmd`（夹爪开/关指令，`std_msgs/String`）
+| Topic | 类型 | 说明 |
+|-------|------|------|
+| `/robot_arm/cart_target` | `PointStamped` | Cartesian 小步命令（frame: base_link） |
+| `/robot_arm/target_joint` | `Float64MultiArray` | 关节空间指令（6 个值） |
+| `/robot_arm/gripper_cmd` | `String` | 夹爪指令（"open" / "close"） |
 
 ### 7.3 视觉目标输入
 
-- `/camera_target_base`（`robot_msgs/msg/CameraTarget`）
-
-当前 `camera_target_executor` 的目标是先完成：
-
-- 接收视觉侧给出的 base 坐标目标，并读取置信度
-- 做工作空间检查
-- 规划一段候选小步路径
-- 只下发第一个小步到执行层
-- 等待新的视觉反馈后再决定下一步
+| Topic | 类型 | 说明 |
+|-------|------|------|
+| `/visual_target_base` | `VisualTarget` | 新版统一视觉目标（方案一 / 方案二共用） |
+| `/camera_target_base` | `CameraTarget` | 旧版视觉目标（camera_target_executor 使用） |
 
 ---
 
@@ -281,13 +355,18 @@ ros2 topic pub --once /camera_target_base robot_msgs/msg/CameraTarget \
 
 - 基础工作区搭建
 - `AirbotWrapper` 的统一接口封装
-- `/robot_arm/end_pose` 发布
+- `arm_executor_node` 作为唯一硬件 owner（线程安全 SDK 访问）
+- `/robot_arm/joint_state` 发布（10 Hz，含关节角、关节速度、末端位姿）
 - `init_arm` / `sleep_arm` 基础动作脚本
-- `camera_target_executor` 已重构为纯任务节点，向执行层发布 `/robot_arm/cart_target`
-- 新增 `robot_msgs/CameraTarget.msg`，统一视觉目标格式
-- 新增 `cart_move_node.py`，执行层负责笛卡尔小步移动
-- 统一消息接口的第一轮整理
-- `arm_executor_node` 单节点执行模式的引入
+- 旧版 `camera_target_executor` 保留兼容
+- 新增 `VisualTarget.msg` 统一视觉目标消息
+- 新增 `robot_tasks/shared/` 共用工具模块（target_filter, grasp_planner, servo_utils）
+- 新增 `grasp_task_open_loop.py`（方案一：开环抓取，完整状态机）
+- 新增 `grasp_task_visual_servo.py`（方案二：视觉伺服抓取，完整状态机）
+- 新增 `open_loop_grasp.launch.py` / `visual_servo_grasp.launch.py`
+- 新增 `open_loop_grasp.yaml` / `visual_servo_grasp.yaml` 参数文件
+
+两种方案可以在同一台 X5 中长期共存，只通过 launch 切换，不需要改底层代码。
 
 ---
 
@@ -301,17 +380,17 @@ ros2 topic pub --once /camera_target_base robot_msgs/msg/CameraTarget \
    - 统一动作等待逻辑
 
 2. 稳定 `arm_executor_node`
-   - 成为唯一硬件 owner
+   - 作为唯一硬件 owner，持续优化线程安全
    - 统一发布状态与末端位姿
 
 3. 继续增强任务层
-   - 完善 `camera_target_executor` 的阶段机
-   - 支持 `PREGRASP / ALIGN / FINAL_APPROACH / CLOSE_GRIPPER / LIFT / RETREAT`
-   - 基于置信度、目标漂移、视觉稳定性做决策
+   - 完善两个任务节点的状态机细节
+   - 实机调试 joint6 补偿方向和时机
+   - 视觉伺服闭环参数实机标定（gain_k, dead_zone 等）
 
 4. 明确视觉侧目标接口
-   - `/camera_target_base` 使用 `robot_msgs/CameraTarget`
-   - 支持 `confidence`、`is_stable`、`target_id` 等字段
+   - `/visual_target_base` 使用 `robot_msgs/VisualTarget`
+   - 视觉侧发布节点对接
 
 5. 继续保持执行层唯一性
    - 所有真实动作下发到 `robot_arm_driver`

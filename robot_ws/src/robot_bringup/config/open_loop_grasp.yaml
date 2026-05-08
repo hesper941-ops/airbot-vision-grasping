@@ -1,0 +1,52 @@
+# ===================================================================
+# 方案一：开环抓取参数配置
+#
+# 适用节点：grasp_task_open_loop
+# 策略：一次识别 + 坐标转换 + 分阶段抓取
+# ===================================================================
+
+grasp_task_open_loop:
+  ros__parameters:
+    # ---- 路径点 Z 偏移（米） ----
+    pre_grasp_z_offset: 0.12       # pre_grasp 在目标上方的高度
+    grasp_z_offset: 0.0            # 抓取点 Z 偏移（0 = 目标本身）
+    lift_z_offset: 0.10            # 抓取后垂直抬升高度
+
+    # ---- 置信度阈值 ----
+    min_confidence_start: 0.7      # 启动抓取的最低置信度
+    confidence_low: 0.3            # 最低可接受置信度
+
+    # ---- 稳定性判断 ----
+    stable_count_required: 3       # 连续稳定帧数
+    drift_threshold: 0.05          # 目标漂移阈值（米）
+
+    # ---- 工作空间边界（base_link 系，米） ----
+    workspace_limits:
+      x_min: 0.10
+      x_max: 1.00
+      y_min: -0.45
+      y_max: 0.50
+      z_min: 0.02
+      z_max: 0.70
+
+    # ---- 安全撤退位姿 ----
+    safe_pose: [0.35, 0.0, 0.35]
+
+    # ---- Joint6 末端补偿（度） ----
+    joint6_compensation_deg: 90.0
+
+    # ---- 各阶段单步最大步长（米） ----
+    pre_grasp_step: 0.10           # 逼近 pre_grasp 阶段
+    descend_step: 0.05             # 下降阶段
+    lift_step: 0.08                # 抬升阶段
+    retreat_step: 0.10             # 撤退阶段
+
+    # ---- 到达判定阈值（米） ----
+    reach_threshold: 0.03          # 距目标小于此值视为到达
+
+    # ---- 夹爪 ----
+    gripper_settle_sec: 1.0        # 闭合后稳定等待时间
+
+    # ---- 超时与频率 ----
+    cmd_timeout_sec: 10.0          # 指令超时（秒）
+    loop_hz: 4                     # 状态机主循环频率
