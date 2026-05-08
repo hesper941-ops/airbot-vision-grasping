@@ -32,6 +32,7 @@ setup(
             'camera_target_executor = robot_tasks.camera_target_executor:main',
             'grasp_task_open_loop = robot_tasks.grasp_task_open_loop:main',
             'grasp_task_visual_servo = robot_tasks.grasp_task_visual_servo:main',
+            'visual_target_bridge = robot_tasks.visual_target_bridge:main',
         ],
     },
 )

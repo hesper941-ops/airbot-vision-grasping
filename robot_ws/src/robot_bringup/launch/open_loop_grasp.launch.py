@@ -42,6 +42,13 @@ def generate_launch_description():
     )
 
     # 开环抓取任务节点
+    bridge_node = Node(
+        package='robot_tasks',
+        executable='visual_target_bridge',
+        name='visual_target_bridge',
+        output='screen',
+    )
+
     open_loop_node = Node(
         package='robot_tasks',
         executable='grasp_task_open_loop',
@@ -53,5 +60,6 @@ def generate_launch_description():
     return LaunchDescription([
         config_arg,
         arm_bringup,
+        bridge_node,
         open_loop_node,
     ])
