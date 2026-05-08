@@ -1,3 +1,4 @@
+import math
 import queue
 import threading
 
@@ -11,7 +12,7 @@ from robot_msgs.msg import ArmJointState
 
 
 class ArmExecutorNode(Node):
-    """Single hardware owner for AIRBOT arm execution and state publishing.
+    """唯一硬件 owner，启动时自动走到初始工作位姿，然后进入命令监听循环。
 
     All real robot commands should pass through this node. Keeping one SDK
     connection avoids command races between separate ROS nodes.
@@ -20,8 +21,17 @@ class ArmExecutorNode(Node):
     def __init__(self):
         super().__init__('arm_executor_node')
 
+        # ---- 初始化参数 ----
+        self.declare_parameter('do_init', True)
+        self.declare_parameter('init_joint_pos_deg', [0.0, -45.0, 120.0, -90.0, 90.0, 90.0])
+
+        # ---- 连接机械臂 ----
         self.arm = AirbotWrapper(url='localhost', port=50001)
         self.arm.connect(speed_profile='default')
+
+        # 启动时自动走到初始工作位姿（可配置关闭）
+        if self.get_parameter('do_init').value:
+            self._move_to_init_pose()
 
         self.sdk_lock = threading.Lock()
         self.last_state_msg = None
@@ -58,6 +68,26 @@ class ArmExecutorNode(Node):
         self.get_logger().info('ArmExecutorNode started as the single hardware owner.')
         self.get_logger().info('Publishing: /robot_arm/joint_state')
         self.get_logger().info('Listening: /robot_arm/target_joint, /robot_arm/cart_target, /robot_arm/gripper_cmd')
+
+    def _deg2rad(self, deg: float) -> float:
+        return deg * math.pi / 180.0
+
+    def _move_to_init_pose(self):
+        """启动时同步执行：走到初始工作位姿。
+
+        这个操作在 worker 线程启动前同步完成，确保后续命令是在
+        机械臂已就位的基础上执行。
+        """
+        deg = self.get_parameter('init_joint_pos_deg').value
+        rad = [self._deg2rad(v) for v in deg]
+        self.get_logger().info(
+            f'机械臂初始化: 目标关节角(deg)={deg}')
+        try:
+            self.arm.get_state()  # 确认连接正常
+            self.arm.move_joints(rad)
+            self.get_logger().info('机械臂已到达初始工作位姿')
+        except Exception as e:
+            self.get_logger().error(f'初始化失败: {e}，继续启动...')
 
     def joint_target_callback(self, msg):
         """Validate and enqueue a joint-space command."""

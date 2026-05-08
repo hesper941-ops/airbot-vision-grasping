@@ -33,11 +33,12 @@ def generate_launch_description():
         description='方案二（视觉伺服抓取）参数 YAML 文件路径'
     )
 
-    # 包含执行层（arm_executor_node）
+    # 包含执行层（arm_executor_node），传入同一份配置文件
     arm_bringup_launch = os.path.join(
         bringup_dir, 'launch', 'arm_bringup.launch.py')
     arm_bringup = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(arm_bringup_launch)
+        PythonLaunchDescriptionSource(arm_bringup_launch),
+        launch_arguments={'config_file': LaunchConfiguration('config_file')}.items(),
     )
 
     # 视觉伺服抓取任务节点
