@@ -23,21 +23,23 @@ public:
                     mask_window_name_("Box Mask")
     {
         show_image_ = this->declare_parameter<bool>("show_image", false);
+        min_depth_mm_ = this->declare_parameter<int>("min_depth_mm", 100);
+        max_depth_mm_ = this->declare_parameter<int>("max_depth_mm", 1100);
 
         color_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-            "/camera/color/image_raw", 10,
+            "/camera/color/image_raw", 1,
             std::bind(&BoxDetector::colorCallback, this, _1));
 
         depth_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
-            "/camera/depth/image_raw", 10,
+            "/camera/depth/image_raw", 1,
             std::bind(&BoxDetector::depthCallback, this, _1));
 
         camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
-            "/camera/color/camera_info", 10,
+            "/camera/color/camera_info", 1,
             std::bind(&BoxDetector::cameraInfoCallback, this, _1));
 
         publisher_ = this->create_publisher<geometry_msgs::msg::PointStamped>(
-            "/box_position", 10);
+            "/box_position", 3);
 
         if (show_image_) {
             cv::namedWindow(window_name_, cv::WINDOW_NORMAL);
@@ -46,8 +48,10 @@ public:
             cv::resizeWindow(mask_window_name_, 640, 480);
         }
 
-        RCLCPP_INFO(this->get_logger(), "Box detector node started, show_image=%s",
-                    show_image_ ? "true" : "false");
+        RCLCPP_INFO(this->get_logger(),
+                    "Box detector node started, show_image=%s, depth_range=[%d, %d] mm",
+                    show_image_ ? "true" : "false",
+                    min_depth_mm_, max_depth_mm_);
     }
 
     ~BoxDetector()
@@ -76,16 +80,21 @@ private:
     std::mutex cam_info_mutex_;
 
     bool show_image_ = false;
+    int min_depth_mm_ = 100;
+    int max_depth_mm_ = 1000;
+
     std::string window_name_;
     std::string mask_window_name_;
 
     void cameraInfoCallback(const sensor_msgs::msg::CameraInfo::SharedPtr msg)
     {
         std::lock_guard<std::mutex> lock(cam_info_mutex_);
+
         fx_ = msg->k[0];
         fy_ = msg->k[4];
         cx_ = msg->k[2];
         cy_ = msg->k[5];
+
         camera_frame_id_ = msg->header.frame_id;
         has_camera_info_ = true;
 
@@ -109,13 +118,17 @@ private:
                 const cv::Mat &depth_float = cv_ptr->image;
 
                 depth_img = cv::Mat(depth_float.size(), CV_16UC1, cv::Scalar(0));
+
                 for (int y = 0; y < depth_float.rows; ++y) {
                     for (int x = 0; x < depth_float.cols; ++x) {
                         float d_m = depth_float.at<float>(y, x);
+
                         if (std::isfinite(d_m) && d_m > 0.0f) {
                             int d_mm = static_cast<int>(d_m * 1000.0f);
+
                             if (d_mm > 0 && d_mm < 65535) {
-                                depth_img.at<uint16_t>(y, x) = static_cast<uint16_t>(d_mm);
+                                depth_img.at<uint16_t>(y, x) =
+                                    static_cast<uint16_t>(d_mm);
                             }
                         }
                     }
@@ -139,13 +152,18 @@ private:
         if (depth_img.empty()) return -1;
 
         std::vector<int> vals;
+
         for (int dy = -radius; dy <= radius; ++dy) {
             for (int dx = -radius; dx <= radius; ++dx) {
                 int x = cx + dx;
                 int y = cy + dy;
-                if (x < 0 || x >= depth_img.cols || y < 0 || y >= depth_img.rows) continue;
+
+                if (x < 0 || x >= depth_img.cols || y < 0 || y >= depth_img.rows) {
+                    continue;
+                }
 
                 int d = static_cast<int>(depth_img.at<uint16_t>(y, x));
+
                 if (d > 80 && d < 10000) {
                     vals.push_back(d);
                 }
@@ -153,6 +171,7 @@ private:
         }
 
         if (vals.size() < 5) return -1;
+
         std::sort(vals.begin(), vals.end());
         return vals[vals.size() / 2];
     }
@@ -160,20 +179,23 @@ private:
     int getRobustDepthFromMask(const cv::Mat &depth_img,
                                const cv::Mat &obj_mask,
                                const cv::Rect &obj_rect,
-                               int u, int v)
+                               int u,
+                               int v)
     {
         if (depth_img.empty() || obj_mask.empty()) return -1;
 
         cv::Rect roi = obj_rect & cv::Rect(0, 0, depth_img.cols, depth_img.rows);
+
         if (roi.width <= 0 || roi.height <= 0) {
             return getWindowDepthMedian(depth_img, u, v, 5);
         }
 
         cv::Mat use_mask = obj_mask.clone();
-
         cv::Mat eroded;
+
         cv::erode(obj_mask, eroded,
                   cv::getStructuringElement(cv::MORPH_RECT, {5, 5}));
+
         if (cv::countNonZero(eroded) > 30) {
             use_mask = eroded;
         }
@@ -189,6 +211,7 @@ private:
                 if (m_ptr[x] == 0) continue;
 
                 int d = static_cast<int>(d_ptr[x]);
+
                 if (d > 80 && d < 10000) {
                     depths.push_back(d);
                 }
@@ -197,11 +220,13 @@ private:
 
         if (depths.size() >= 12) {
             std::sort(depths.begin(), depths.end());
+
             int median = depths[depths.size() / 2];
             int tol = std::max(80, median / 10);
 
             std::vector<int> filtered;
             filtered.reserve(depths.size());
+
             for (int d : depths) {
                 if (std::abs(d - median) <= tol) {
                     filtered.push_back(d);
@@ -212,13 +237,16 @@ private:
                 std::sort(filtered.begin(), filtered.end());
                 return filtered[filtered.size() / 2];
             }
+
             return median;
         }
 
         int d = getWindowDepthMedian(depth_img, u, v, 3);
         if (d > 0) return d;
+
         d = getWindowDepthMedian(depth_img, u, v, 5);
         if (d > 0) return d;
+
         d = getWindowDepthMedian(depth_img, u, v, 7);
         return d;
     }
@@ -234,6 +262,7 @@ private:
         Z = depth_mm / 1000.0;
         X = (u - cx_) * Z / fx_;
         Y = (v - cy_) * Z / fy_;
+
         return true;
     }
 
@@ -241,6 +270,7 @@ private:
     {
         cv::putText(img, text, cv::Point(x, y), cv::FONT_HERSHEY_SIMPLEX,
                     0.7, cv::Scalar(0, 0, 0), 3);
+
         cv::putText(img, text, cv::Point(x, y), cv::FONT_HERSHEY_SIMPLEX,
                     0.7, cv::Scalar(0, 255, 255), 2);
     }
@@ -253,6 +283,7 @@ private:
         cv::imshow(mask_window_name_, mask);
 
         int key = cv::waitKey(1);
+
         if (key == 'q' || key == 'Q') {
             RCLCPP_INFO(this->get_logger(), "Pressed q, shutting down...");
             rclcpp::shutdown();
@@ -261,16 +292,23 @@ private:
 
     cv::Mat removeSmallComponents(const cv::Mat &binary, int min_area)
     {
-        cv::Mat labels, stats, centroids;
-        int num = cv::connectedComponentsWithStats(binary, labels, stats, centroids, 8, CV_32S);
+        cv::Mat labels;
+        cv::Mat stats;
+        cv::Mat centroids;
+
+        int num = cv::connectedComponentsWithStats(
+            binary, labels, stats, centroids, 8, CV_32S);
 
         cv::Mat clean = cv::Mat::zeros(binary.size(), CV_8UC1);
+
         for (int i = 1; i < num; ++i) {
             int area = stats.at<int>(i, cv::CC_STAT_AREA);
+
             if (area >= min_area) {
                 clean.setTo(255, labels == i);
             }
         }
+
         return clean;
     }
 
@@ -293,56 +331,74 @@ private:
         cv::Mat depth_img;
         {
             std::lock_guard<std::mutex> lock(depth_mutex_);
+
             if (!latest_depth_.empty()) {
                 depth_img = latest_depth_.clone();
             }
         }
 
-        // =========================
-        // 1) 更窄的绿色阈值 + BGR约束 + ROI限制
-        // =========================
-        cv::Mat blur, hsv, mask_hsv, mask;
+        cv::Mat blur;
         cv::GaussianBlur(image, blur, cv::Size(5, 5), 0);
+
+        cv::Mat hsv;
+        cv::Mat lab;
         cv::cvtColor(blur, hsv, cv::COLOR_BGR2HSV);
+        cv::cvtColor(blur, lab, cv::COLOR_BGR2Lab);
 
-        // 绿色阈值收紧，不要太大
-        cv::inRange(hsv, cv::Scalar(50, 80, 70), cv::Scalar(78, 255, 255), mask_hsv);
+        cv::Mat mask_hsv;
+        cv::inRange(hsv,
+                    cv::Scalar(45, 55, 45),
+                    cv::Scalar(88, 255, 255),
+                    mask_hsv);
 
-        // 再加一层 BGR 约束：G 要明显大于 R 和 B
+        cv::Mat mask_lab;
+        cv::inRange(lab,
+                    cv::Scalar(0, 60, 95),
+                    cv::Scalar(255, 135, 210),
+                    mask_lab);
+
         std::vector<cv::Mat> bgr;
         cv::split(blur, bgr);
 
-        cv::Mat g_r_diff, g_b_diff, cond_gr, cond_gb;
-        cv::subtract(bgr[1], bgr[2], g_r_diff);   // G - R
-        cv::subtract(bgr[1], bgr[0], g_b_diff);   // G - B
+        cv::Mat b16;
+        cv::Mat g16;
+        cv::Mat r16;
 
-        cv::compare(g_r_diff, 18, cond_gr, cv::CMP_GT);
-        cv::compare(g_b_diff, 6, cond_gb, cv::CMP_GT);
+        bgr[0].convertTo(b16, CV_16S);
+        bgr[1].convertTo(g16, CV_16S);
+        bgr[2].convertTo(r16, CV_16S);
 
-        cv::bitwise_and(mask_hsv, cond_gr, mask);
-        cv::bitwise_and(mask, cond_gb, mask);
+        cv::Mat g_bright;
+        cv::threshold(bgr[1], g_bright, 70, 255, cv::THRESH_BINARY);
 
-        // 只在图像下半区域找盒子
-        cv::Mat roi_mask = cv::Mat::zeros(mask.size(), CV_8UC1);
-        int roi_y = static_cast<int>(image.rows * 0.52);
-        cv::rectangle(
-            roi_mask,
-            cv::Rect(0, roi_y, image.cols, image.rows - roi_y),
-            cv::Scalar(255),
-            cv::FILLED
-        );
-        cv::bitwise_and(mask, roi_mask, mask);
+        cv::Mat r_plus;
+        cv::Mat b_plus;
+        cv::Mat cond_gr;
+        cv::Mat cond_gb;
 
-        // 形态学清理
-        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, {5, 5});
-        cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel);
-        cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel);
+        cv::add(r16, cv::Scalar(20), r_plus);
+        cv::add(b16, cv::Scalar(5), b_plus);
 
-        // 去掉小连通域
+        cv::compare(g16, r_plus, cond_gr, cv::CMP_GT);
+        cv::compare(g16, b_plus, cond_gb, cv::CMP_GT);
+
+        cv::Mat mask = mask_hsv & mask_lab & g_bright & cond_gr & cond_gb;
+
+        cv::medianBlur(mask, mask, 3);
+
+        cv::Mat kernel_small = cv::getStructuringElement(cv::MORPH_RECT, {3, 3});
+        cv::Mat kernel_big = cv::getStructuringElement(cv::MORPH_RECT, {5, 5});
+
+        cv::morphologyEx(mask, mask, cv::MORPH_OPEN, kernel_small);
+        cv::morphologyEx(mask, mask, cv::MORPH_CLOSE, kernel_big);
+
         mask = removeSmallComponents(mask, 250);
 
         std::vector<std::vector<cv::Point>> contours;
-        cv::findContours(mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+        cv::Mat mask_for_contours = mask.clone();
+
+        cv::findContours(mask_for_contours, contours,
+                         cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
 
         double best_score = -1.0;
         int best = -1;
@@ -351,68 +407,157 @@ private:
         int best_u = -1;
         int best_v = -1;
 
-        // =========================
-        // 2) 更严格的候选筛选
-        // =========================
+        double img_area = static_cast<double>(image.cols * image.rows);
+
         for (int i = 0; i < static_cast<int>(contours.size()); ++i) {
             double area = cv::contourArea(contours[i]);
-            if (area < 1000) continue;
+
+            double min_area = std::max(300.0, img_area * 0.0008);
+            double max_area = img_area * 0.30;
+
+            if (area < min_area) continue;
+            if (area > max_area) continue;
 
             cv::Rect rect = cv::boundingRect(contours[i]);
-            if (rect.width < 35 || rect.height < 35) continue;
 
-            // 过滤贴边
             if (rect.x <= 2 || rect.y <= 2 ||
                 rect.x + rect.width >= image.cols - 2 ||
                 rect.y + rect.height >= image.rows - 2) {
                 continue;
             }
 
-            // 盒子中心必须更靠下
-            double cy = rect.y + rect.height * 0.5;
-            if (cy < image.rows * 0.58) {
+            if (rect.width < 18 || rect.height < 18) {
                 continue;
             }
 
-            double rect_area = static_cast<double>(rect.width) * rect.height;
+            double rect_area = static_cast<double>(rect.area());
             if (rect_area <= 1.0) continue;
 
             double extent = area / rect_area;
-            if (extent < 0.35) continue;
+            if (extent < 0.30) continue;
 
-            double wh_ratio = static_cast<double>(rect.width) / rect.height;
-            if (wh_ratio < 0.65 || wh_ratio > 1.45) continue;
+            double wh_ratio = static_cast<double>(rect.width) /
+                              static_cast<double>(rect.height);
+
+            if (wh_ratio < 0.45 || wh_ratio > 2.20) {
+                continue;
+            }
 
             std::vector<cv::Point> hull;
             cv::convexHull(contours[i], hull);
+
             double hull_area = cv::contourArea(hull);
-            double solidity = (hull_area > 1e-6) ? (area / hull_area) : 0.0;
-            if (solidity < 0.78) continue;
+            if (hull_area <= 1e-6) continue;
+
+            double solidity = area / hull_area;
+            if (solidity < 0.62) {
+                continue;
+            }
 
             cv::RotatedRect rr = cv::minAreaRect(contours[i]);
-            cv::Point2f center = rr.center;
 
-            int u = static_cast<int>(std::round(center.x));
-            int v = static_cast<int>(std::round(center.y));
+            double rr_w = std::max(static_cast<double>(rr.size.width),
+                                   static_cast<double>(rr.size.height));
+            double rr_h = std::min(static_cast<double>(rr.size.width),
+                                   static_cast<double>(rr.size.height));
+
+            if (rr_w <= 1.0 || rr_h <= 1.0) {
+                continue;
+            }
+
+            double rr_ratio = rr_w / rr_h;
+            if (rr_ratio < 1.0 || rr_ratio > 2.05) {
+                continue;
+            }
+
+            double rr_area = rr_w * rr_h;
+            double rr_extent = area / std::max(1.0, rr_area);
+
+            if (rr_extent < 0.50) {
+                continue;
+            }
+
+            cv::Mat candidate_mask = cv::Mat::zeros(mask.size(), CV_8UC1);
+            cv::drawContours(candidate_mask, contours, i, cv::Scalar(255), cv::FILLED);
+
+            cv::Moments mu = cv::moments(contours[i]);
+
+            int u;
+            int v;
+
+            if (std::abs(mu.m00) > 1e-6) {
+                u = static_cast<int>(std::round(mu.m10 / mu.m00));
+                v = static_cast<int>(std::round(mu.m01 / mu.m00));
+            }
+            else {
+                u = static_cast<int>(std::round(rr.center.x));
+                v = static_cast<int>(std::round(rr.center.y));
+            }
 
             u = std::max(0, std::min(u, image.cols - 1));
             v = std::max(0, std::min(v, image.rows - 1));
 
-            cv::Mat obj_mask = cv::Mat::zeros(mask.size(), CV_8UC1);
-            cv::drawContours(obj_mask, contours, i, cv::Scalar(255), cv::FILLED);
+            int depth_mm = getRobustDepthFromMask(depth_img, candidate_mask, rect, u, v);
 
-            int depth_mm = getRobustDepthFromMask(depth_img, obj_mask, rect, u, v);
-
-            double depth_bonus = 0.0;
             if (depth_mm > 0) {
-                double depth_m = depth_mm / 1000.0;
-                depth_bonus = 1000.0 / std::max(0.18, depth_m);
+                if (depth_mm < min_depth_mm_ || depth_mm > max_depth_mm_) {
+                    continue;
+                }
             }
 
-            double score = area * 2.5
-                         + extent * 800.0
-                         + solidity * 500.0
-                         + depth_bonus;
+            cv::Scalar mean_bgr = cv::mean(blur, candidate_mask);
+            cv::Scalar mean_hsv = cv::mean(hsv, candidate_mask);
+            cv::Scalar mean_lab = cv::mean(lab, candidate_mask);
+
+            double mean_b = mean_bgr[0];
+            double mean_g = mean_bgr[1];
+            double mean_r = mean_bgr[2];
+
+            double mean_s = mean_hsv[1];
+            double mean_v = mean_hsv[2];
+
+            double mean_a = mean_lab[1];
+
+            if (mean_g < 65) continue;
+            if (mean_s < 45) continue;
+            if (mean_v < 45) continue;
+            if (mean_g - mean_r < 18) continue;
+            if (mean_g - mean_b < 5) continue;
+            if (mean_a > 135) continue;
+
+            cv::Mat candidate_green;
+            cv::bitwise_and(mask, candidate_mask, candidate_green);
+
+            double green_pixels = static_cast<double>(cv::countNonZero(candidate_green));
+            double green_ratio = green_pixels / std::max(1.0, area);
+
+            if (green_ratio < 0.55) {
+                continue;
+            }
+
+            double depth_score = 0.0;
+
+            if (depth_mm > 0) {
+                depth_score = 600.0 / (1.0 + std::abs(depth_mm - 450) / 160.0);
+            }
+
+            double color_score =
+                1.2 * std::max(0.0, mean_g - mean_r) +
+                0.9 * std::max(0.0, mean_g - mean_b) +
+                0.8 * mean_s +
+                0.6 * std::max(0.0, 128.0 - mean_a);
+
+            double shape_score =
+                700.0 * rr_extent +
+                600.0 * solidity +
+                500.0 * extent +
+                300.0 / rr_ratio;
+
+            double score =
+                0.25 * area +
+                5.0 * color_score +
+                shape_score +
+                depth_score;
 
             if (score > best_score) {
                 best_score = score;
@@ -448,55 +593,91 @@ private:
         for (int i = 0; i < 4; ++i) {
             cv::line(display, pts[i], pts[(i + 1) % 4], cv::Scalar(0, 255, 0), 2);
         }
+
         cv::circle(display, cv::Point(u, v), 5, cv::Scalar(0, 0, 255), -1);
 
         if (depth_mm <= 0) {
             drawTextLine(display, "Box depth invalid", 20, 35);
+
             char buf[128];
             std::snprintf(buf, sizeof(buf), "pixel=(%d,%d)", u, v);
             drawTextLine(display, buf, 20, 65);
-            showFrame(display, mask);
+
+            showFrame(display, best_mask);
 
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
                 "Box detected at (%d, %d), but depth is invalid", u, v);
+
             return;
         }
 
-        double X = 0.0, Y = 0.0, Z = 0.0;
+        if (depth_mm < min_depth_mm_ || depth_mm > max_depth_mm_) {
+            drawTextLine(display, "Box depth out of range", 20, 35);
+
+            char buf[128];
+            std::snprintf(buf, sizeof(buf), "depth=%d mm range=[%d,%d]",
+                          depth_mm, min_depth_mm_, max_depth_mm_);
+            drawTextLine(display, buf, 20, 65);
+
+            showFrame(display, best_mask);
+
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 1000,
+                "Box depth out of range: %d mm", depth_mm);
+
+            return;
+        }
+
+        double X = 0.0;
+        double Y = 0.0;
+        double Z = 0.0;
+
         if (!pixelToCamera3D(u, v, depth_mm, X, Y, Z)) {
             drawTextLine(display, "Box 3D convert failed", 20, 35);
-            showFrame(display, mask);
+            showFrame(display, best_mask);
 
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
                 "Failed to convert box pixel to camera 3D point");
+
             return;
         }
 
         geometry_msgs::msg::PointStamped msg_out;
         msg_out.header.stamp = msg->header.stamp;
+
         {
             std::lock_guard<std::mutex> lock(cam_info_mutex_);
             msg_out.header.frame_id = camera_frame_id_;
         }
+
         msg_out.point.x = X;
         msg_out.point.y = Y;
         msg_out.point.z = Z;
+
         publisher_->publish(msg_out);
 
         drawTextLine(display, "Box detected", 20, 35);
-        char buf1[128], buf2[128];
-        std::snprintf(buf1, sizeof(buf1), "pixel=(%d,%d) depth=%d mm", u, v, depth_mm);
-        std::snprintf(buf2, sizeof(buf2), "X=%.3f Y=%.3f Z=%.3f m", X, Y, Z);
+
+        char buf1[128];
+        char buf2[128];
+
+        std::snprintf(buf1, sizeof(buf1),
+                      "pixel=(%d,%d) depth=%d mm", u, v, depth_mm);
+
+        std::snprintf(buf2, sizeof(buf2),
+                      "X=%.3f Y=%.3f Z=%.3f m", X, Y, Z);
+
         drawTextLine(display, buf1, 20, 65);
         drawTextLine(display, buf2, 20, 95);
 
-        showFrame(display, mask);
+        showFrame(display, best_mask);
 
         RCLCPP_INFO_THROTTLE(
             this->get_logger(), *this->get_clock(), 500,
-            "Publish box_position: X=%.3f m, Y=%.3f m, Z=%.3f m (pixel u=%d, v=%d, depth=%d mm)",
+            "Publish box_position: X=%.3f m, Y=%.3f m, Z=%.3f m "
+            "(pixel u=%d, v=%d, depth=%d mm)",
             X, Y, Z, u, v, depth_mm);
     }
 };
