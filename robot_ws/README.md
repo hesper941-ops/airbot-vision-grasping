@@ -60,6 +60,7 @@ Topic：`/visual_target_base`
 - `ERROR`
 - `TIMEOUT`
 - `REJECTED_BUSY`
+- `REJECTED_INVALID_JOINT_LIMIT`
 
 ## 开环状态机
 
@@ -88,6 +89,45 @@ RECOVER -> open gripper -> move safe_pose -> IDLE
 - `WAIT_GRASP_TARGET`：机械臂到达 pre-grasp 并停稳后，重新等待新稳定目标，用于真正抓取。
 
 运动阶段中新视觉结果只会更新 `latest_target`，不会修改当前已经下发的 `active_motion_goal`。
+
+## 关节限位保护
+
+### arm_executor_node 是最后一道安全防线
+
+`arm_executor_node` 对所有 `/robot_arm/target_joint` 命令执行全关节限位检查。
+超出限位的 joint target 会被拒绝并发布 `REJECTED_INVALID_JOINT_LIMIT`，**不会**自动裁剪（clamp）。
+
+自动裁剪只适用于 Cartesian waypoint 的工作空间裁剪，不适用于 joint target。
+
+### 当前保守 AIRBOT Play 关节限位
+
+确认真实硬件版本后，可以在 `open_loop_grasp.yaml` 中调整 `joint_min_rad` / `joint_max_rad`。
+
+| 关节 | 角度范围 | 弧度范围 |
+|------|----------|----------|
+| J1 | [-180°, +120°] | [-3.1416, +2.0944] |
+| J2 | [-170°, +10°] | [-2.9671, +0.1745] |
+| J3 | [-5°, +180°] | [-0.0873, +3.1416] |
+| J4 | [-148°, +148°] | [-2.5831, +2.5831] |
+| J5 | [-100°, +100°] | [-1.7453, +1.7453] |
+| J6 | [-170°, +170°] | [-2.9671, +2.9671] |
+
+### init pose 也会检查
+
+`_move_to_init_pose()` 中会将 `init_joint_pos_deg` 转换为弧度后调用同一个 joint limit 检查函数。
+如果 init pose 超限或长度不是 6，executor 进入 ERROR，不执行 move_joints。
+
+## REJECTED_BUSY 处理
+
+单次 `REJECTED_BUSY` 不会立即触发 RECOVER。任务节点会累计连续 `REJECTED_BUSY` 次数，
+仅当达到 `rejected_busy_recover_threshold`（默认 2）时才进入 RECOVER。
+
+当 executor 回到 `IDLE` / `DONE`、任务状态切换、或成功发布新命令后，计数器清零。
+
+## RECOVER 阶段 clear_error 周期重发
+
+当 executor 处于 `ERROR` 状态时，任务节点每 0.5 秒重复发布 `clear_error`，
+直到 executor 不再处于 `ERROR`。这避免了"只发一次但 executor 未收到"的问题。
 
 ## 编译
 
@@ -156,4 +196,31 @@ ros2 topic pub --once /robot_arm/speed_profile std_msgs/msg/String "{data: 'slow
 ```bash
 ros2 topic pub --once /robot_arm/gripper_cmd std_msgs/msg/String "{data: 'open'}"
 ros2 topic pub --once /robot_arm/gripper_cmd std_msgs/msg/String "{data: 'close'}"
+```
+
+### 关节限位测试
+
+测试合法 joint target：
+
+```bash
+ros2 topic pub --once /robot_arm/target_joint std_msgs/msg/Float64MultiArray \
+"{data: [0.0, -0.785, 2.094, -1.571, 1.571, 1.571]}"
+```
+
+测试非法 joint target（J2 超限，期望被拒绝并发布 REJECTED_INVALID_JOINT_LIMIT）：
+
+```bash
+ros2 topic pub --once /robot_arm/target_joint std_msgs/msg/Float64MultiArray \
+"{data: [0.0, 1.0, 2.094, -1.571, 1.571, 1.571]}"
+```
+
+预期：
+- 非法 joint target 被拒绝。
+- executor_status 发布 `REJECTED_INVALID_JOINT_LIMIT`。
+- 不调用 SDK move_joints。
+
+测试 clear_error：
+
+```bash
+ros2 topic pub --once /robot_arm/reset_executor std_msgs/msg/String "{data: 'clear_error'}"
 ```

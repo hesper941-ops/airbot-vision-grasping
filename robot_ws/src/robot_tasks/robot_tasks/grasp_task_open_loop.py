@@ -55,7 +55,8 @@ class GraspTaskOpenLoop(Node):
         self.pending_speed_profile: Optional[str] = None
         self.gripper_settle_start: Optional[float] = None
         self.recover_phase = 'OPEN_GRIPPER'
-        self.reset_executor_sent = False
+        self.last_reset_executor_time: Optional[float] = None
+        self.rejected_busy_count = 0
 
         self.target_sub = self.create_subscription(
             VisualTarget,
@@ -110,8 +111,10 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('lift_z_offset', 0.10)
         self.declare_parameter('safe_pose', [0.35, 0.0, 0.35])
         self.declare_parameter('joint6_compensation_deg', 90.0)
-        self.declare_parameter('joint6_min_rad', -3.14)
-        self.declare_parameter('joint6_max_rad', 3.14)
+        # Conservative J6 range based on AIRBOT Play official specs.
+        # Confirm exact hardware model before widening this range.
+        self.declare_parameter('joint6_min_rad', -2.9671)
+        self.declare_parameter('joint6_max_rad', 2.9671)
 
         self.declare_parameter('confidence_threshold', 0.7)
         self.declare_parameter('stable_frame_count', 5)
@@ -142,6 +145,7 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('set_orientation_timeout_sec', 8.0)
         self.declare_parameter('close_gripper_timeout_sec', 4.0)
         self.declare_parameter('recover_timeout_sec', 15.0)
+        self.declare_parameter('rejected_busy_recover_threshold', 2)
         self.declare_parameter('loop_hz', 4.0)
 
     def _config_dict(self) -> dict:
@@ -195,7 +199,26 @@ class GraspTaskOpenLoop(Node):
 
     def executor_status_callback(self, msg: String):
         self.executor_status = msg.data.strip().upper()
-        if self.executor_status in ('ERROR', 'TIMEOUT', 'REJECTED_BUSY'):
+
+        if self.executor_status in ('IDLE', 'DONE'):
+            self.rejected_busy_count = 0
+
+        if self.executor_status == 'REJECTED_BUSY':
+            if self.task_state == 'RECOVER':
+                return
+            self.rejected_busy_count += 1
+            threshold = int(self.get_parameter('rejected_busy_recover_threshold').value)
+            if self.rejected_busy_count >= threshold:
+                self.get_logger().error(
+                    f'REJECTED_BUSY {self.rejected_busy_count} times (>= {threshold}); entering RECOVER.')
+                self._enter_recover()
+            else:
+                self.get_logger().warning(
+                    f'REJECTED_BUSY {self.rejected_busy_count}/{threshold}; '
+                    f'waiting for executor to return IDLE before escalating to RECOVER.')
+            return
+
+        if self.executor_status in ('ERROR', 'TIMEOUT'):
             self.get_logger().error(
                 f'Executor status {self.executor_status}; entering RECOVER.')
             self._enter_recover()
@@ -395,10 +418,13 @@ class GraspTaskOpenLoop(Node):
             return
 
         if self.executor_status == 'ERROR':
-            if not self.reset_executor_sent:
+            now = self._now_sec()
+            if self.last_reset_executor_time is None or now - self.last_reset_executor_time >= 0.5:
                 self._publish_reset_executor('clear_error')
-                self.reset_executor_sent = True
-                self.get_logger().warning('RECOVER: requested executor clear_error.')
+                self.last_reset_executor_time = now
+                self.get_logger().warning(
+                    'RECOVER: requested executor clear_error '
+                    '(repeating every 0.5 s while executor is ERROR).')
             return
 
         if self.recover_phase == 'OPEN_GRIPPER':
@@ -558,7 +584,8 @@ class GraspTaskOpenLoop(Node):
         self.target_window.clear()
         self.recover_phase = 'OPEN_GRIPPER'
         self.pending_speed_profile = None
-        self.reset_executor_sent = False
+        self.last_reset_executor_time = None
+        self.rejected_busy_count = 0
         self._transition('RECOVER')
 
     def _finish_recover(self):
@@ -582,7 +609,8 @@ class GraspTaskOpenLoop(Node):
         self.pending_speed_profile = None
         self.recover_phase = 'OPEN_GRIPPER'
         self.gripper_settle_start = None
-        self.reset_executor_sent = False
+        self.last_reset_executor_time = None
+        self.rejected_busy_count = 0
         self._reset_stage_vars()
 
     def _reset_stage_vars(self):
@@ -599,6 +627,7 @@ class GraspTaskOpenLoop(Node):
         if clear_window:
             self.target_window.clear()
         if old_state != new_state:
+            self.rejected_busy_count = 0
             self.get_logger().info(f'State transition: {old_state} -> {new_state}')
 
     def _set_speed_profile(self, profile: str):
@@ -616,6 +645,7 @@ class GraspTaskOpenLoop(Node):
         msg.data = self.pending_speed_profile
         self.speed_pub.publish(msg)
         self.speed_profile_active = self.pending_speed_profile
+        self.rejected_busy_count = 0
         self.get_logger().info(f'Published speed_profile: {msg.data}')
         self.pending_speed_profile = None
         return True
@@ -628,16 +658,19 @@ class GraspTaskOpenLoop(Node):
         msg.point.y = float(xyz[1])
         msg.point.z = float(xyz[2])
         self.cart_pub.publish(msg)
+        self.rejected_busy_count = 0
 
     def _publish_joint_target(self, joint_pos: list):
         msg = Float64MultiArray()
         msg.data = [float(v) for v in joint_pos]
         self.joint_pub.publish(msg)
+        self.rejected_busy_count = 0
 
     def _publish_gripper_command(self, command: str):
         msg = String()
         msg.data = command
         self.gripper_pub.publish(msg)
+        self.rejected_busy_count = 0
 
     def _publish_reset_executor(self, command: str):
         msg = String()

@@ -5,11 +5,16 @@
 This node is the only place that calls the AIRBOT SDK. It accepts one command
 only when the executor is idle. Commands received while a motion is running are
 rejected immediately and are never queued or cached for later execution.
+
+All joint targets are validated against conservative AIRBOT Play joint limits
+before being forwarded to the SDK.  Targets that violate any joint limit are
+rejected with REJECTED_INVALID_JOINT_LIMIT — automatic clamping is intentionally
+not applied so that the task layer always receives clear feedback.
 """
 
 import math
 import threading
-from typing import Any
+from typing import Any, Optional, Tuple
 
 import rclpy
 from geometry_msgs.msg import PointStamped, PoseStamped
@@ -28,6 +33,7 @@ class ArmExecutorNode(Node):
     DONE = 'DONE'
     ERROR = 'ERROR'
     REJECTED_BUSY = 'REJECTED_BUSY'
+    REJECTED_INVALID_JOINT_LIMIT = 'REJECTED_INVALID_JOINT_LIMIT'
 
     def __init__(self):
         super().__init__('arm_executor_node')
@@ -36,6 +42,19 @@ class ArmExecutorNode(Node):
         self.declare_parameter(
             'init_joint_pos_deg',
             [0.0, -45.0, 120.0, -90.0, 90.0, 90.0],
+        )
+
+        # Conservative AIRBOT Play joint limits.
+        # Confirm the exact hardware model before widening these values.
+        # J1 [-180°, +120°], J2 [-170°, +10°], J3 [-5°, +180°],
+        # J4 [-148°, +148°], J5 [-100°, +100°], J6 [-170°, +170°].
+        self.declare_parameter(
+            'joint_min_rad',
+            [-3.1416, -2.9671, -0.0873, -2.5831, -1.7453, -2.9671],
+        )
+        self.declare_parameter(
+            'joint_max_rad',
+            [2.0944, 0.1745, 3.1416, 2.5831, 1.7453, 2.9671],
         )
 
         self.arm = AirbotWrapper(url='localhost', port=50001)
@@ -104,14 +123,91 @@ class ArmExecutorNode(Node):
         self.get_logger().info(
             'Publishing /robot_arm/joint_state, /robot_arm/end_pose, '
             '/robot_arm/executor_status.')
+        self.get_logger().info(
+            'Joint limits active: all 6 joints checked; '
+            'targets exceeding limits are rejected without automatic clamping.')
 
-    def _deg2rad(self, deg: float) -> float:
+    # ------------------------------------------------------------------
+    # Joint limit helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _rad_to_deg(rad: float) -> float:
+        """Convert radians to degrees."""
+        return rad * 180.0 / math.pi
+
+    def _get_joint_limits(self) -> Tuple[list, list]:
+        """Return (joint_min_rad, joint_max_rad) as six-element lists."""
+        min_rad = list(self.get_parameter('joint_min_rad').value)
+        max_rad = list(self.get_parameter('joint_max_rad').value)
+        return min_rad, max_rad
+
+    def _validate_joint_target(self, target: list) -> bool:
+        """Return True if every joint is within the configured limits.
+
+        Logs detailed per-joint error information when a violation is found.
+        """
+        if len(target) != 6:
+            self.get_logger().error(
+                f'Joint target length is {len(target)}, expected 6.')
+            return False
+
+        joint_min, joint_max = self._get_joint_limits()
+
+        if len(joint_min) != 6 or len(joint_max) != 6:
+            self.get_logger().error(
+                f'Joint limit arrays have wrong length: '
+                f'min={len(joint_min)}, max={len(joint_max)} (both must be 6).')
+            return False
+
+        for i in range(6):
+            value = float(target[i])
+            lo = float(joint_min[i])
+            hi = float(joint_max[i])
+            if value < lo or value > hi:
+                self.get_logger().error(
+                    f'Joint J{i+1} target out of limits: '
+                    f'target={value:.4f} rad ({self._rad_to_deg(value):.2f} deg), '
+                    f'allowed=[{lo:.4f}, {hi:.4f}] rad '
+                    f'([{self._rad_to_deg(lo):.2f}, {self._rad_to_deg(hi):.2f}] deg).')
+                return False
+
+        return True
+
+    # ------------------------------------------------------------------
+    # Motion helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _deg2rad(deg: float) -> float:
         return deg * math.pi / 180.0
 
     def _move_to_init_pose(self):
+        """Move arm to the configured initial joint pose, with limit checks.
+
+        If the init pose exceeds joint limits or has wrong length the executor
+        enters ERROR and does not execute the move.
+        """
         deg = self.get_parameter('init_joint_pos_deg').value
-        rad = [self._deg2rad(v) for v in deg]
-        self.get_logger().info(f'Moving to init joint pose deg={deg}')
+
+        if len(deg) != 6:
+            self.get_logger().error(
+                f'init_joint_pos_deg length is {len(deg)}, expected 6. '
+                f'Executor entering ERROR; no init move performed.')
+            self._publish_executor_status(self.ERROR)
+            return
+
+        rad = [self._deg2rad(float(v)) for v in deg]
+
+        if not self._validate_joint_target(rad):
+            self.get_logger().error(
+                'init_joint_pos_deg violates joint limits. '
+                'Executor entering ERROR; no init move performed.')
+            self._publish_executor_status(self.ERROR)
+            return
+
+        self.get_logger().info(
+            f'Moving to init joint pose deg={[float(v) for v in deg]}')
         try:
             with self.sdk_lock:
                 self._publish_executor_status(self.BUSY)
@@ -125,12 +221,24 @@ class ArmExecutorNode(Node):
             if self._get_executor_state() != self.ERROR:
                 self._publish_executor_status(self.IDLE)
 
+    # ------------------------------------------------------------------
+    # Command callbacks
+    # ------------------------------------------------------------------
+
     def joint_target_callback(self, msg: Float64MultiArray):
         target = [float(v) for v in msg.data]
         if len(target) != 6:
             self.get_logger().error(
                 f'Invalid joint target length: {len(target)} (expected 6).')
             return
+
+        # Full 6-joint limit validation — reject, never clamp.
+        if not self._validate_joint_target(target):
+            self.get_logger().error(
+                'Joint target rejected due to limit violation.')
+            self._publish_executor_status(self.REJECTED_INVALID_JOINT_LIMIT)
+            return
+
         self._try_start_command('joint', target)
 
     def cart_target_callback(self, msg: PointStamped):
@@ -172,6 +280,10 @@ class ArmExecutorNode(Node):
             self.get_logger().warning('clear_error received; executor ERROR cleared to IDLE.')
             self._publish_executor_status_locked(self.IDLE)
 
+    # ------------------------------------------------------------------
+    # Command dispatch
+    # ------------------------------------------------------------------
+
     def _try_start_command(self, command_type: str, payload: Any):
         with self.status_lock:
             if self.executor_state == self.ERROR:
@@ -183,7 +295,6 @@ class ArmExecutorNode(Node):
             if self.executor_state == self.BUSY:
                 self.get_logger().warning(
                     f'Executor busy; reject {command_type} command: {payload}')
-                self.get_logger().warning(f'Executor status: REJECTED_BUSY {command_type}')
                 self._publish_executor_status_locked(self.REJECTED_BUSY)
                 self._publish_executor_status_locked(self.BUSY)
                 return
@@ -227,6 +338,10 @@ class ArmExecutorNode(Node):
 
         self._publish_executor_status(self.IDLE)
 
+    # ------------------------------------------------------------------
+    # State publishing
+    # ------------------------------------------------------------------
+
     def publish_state(self):
         """Publish joint state and end-effector pose if the SDK can be sampled."""
         if not self.sdk_lock.acquire(blocking=False):
@@ -268,6 +383,10 @@ class ArmExecutorNode(Node):
             self._set_error(f'Failed to publish arm state: {exc}')
         finally:
             self.sdk_lock.release()
+
+    # ------------------------------------------------------------------
+    # Internal state helpers
+    # ------------------------------------------------------------------
 
     def _get_executor_state(self) -> str:
         with self.status_lock:

@@ -18,8 +18,10 @@ class GraspPlanner:
         self.lift_z_offset = config.get('lift_z_offset', 0.10)
         self.safe_pose = config.get('safe_pose', [0.35, 0.00, 0.35])
         self.joint6_compensation_deg = config.get('joint6_compensation_deg', 90.0)
-        self.joint6_min_rad = float(config.get('joint6_min_rad', -3.14))
-        self.joint6_max_rad = float(config.get('joint6_max_rad', 3.14))
+        # Conservative J6 range based on AIRBOT Play official specs.
+        # Confirm exact hardware model before widening these defaults.
+        self.joint6_min_rad = float(config.get('joint6_min_rad', -2.9671))
+        self.joint6_max_rad = float(config.get('joint6_max_rad', 2.9671))
 
         limits = config.get('workspace_limits', {})
         self.x_min = limits.get('x_min', 0.10)

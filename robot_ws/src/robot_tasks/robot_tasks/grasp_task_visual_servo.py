@@ -143,6 +143,8 @@ class GraspTaskVisualServo(Node):
         self.declare_parameter('safe_pose', [0.35, 0.0, 0.35])
         # joint6 补偿
         self.declare_parameter('joint6_compensation_deg', 90.0)
+        self.declare_parameter('joint6_min_rad', -2.9671)
+        self.declare_parameter('joint6_max_rad', 2.9671)
         # 粗定位步长
         self.declare_parameter('coarse_step', 0.10)
         # 视觉伺服参数
@@ -177,6 +179,8 @@ class GraspTaskVisualServo(Node):
             'drift_threshold': self.get_parameter('drift_threshold').value,
             'safe_pose': self.get_parameter('safe_pose').value,
             'joint6_compensation_deg': self.get_parameter('joint6_compensation_deg').value,
+            'joint6_min_rad': self.get_parameter('joint6_min_rad').value,
+            'joint6_max_rad': self.get_parameter('joint6_max_rad').value,
             'workspace_limits': {
                 'x_min': self.get_parameter('workspace_limits.x_min').value,
                 'x_max': self.get_parameter('workspace_limits.x_max').value,
