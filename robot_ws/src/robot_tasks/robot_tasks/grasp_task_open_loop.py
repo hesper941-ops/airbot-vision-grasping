@@ -139,7 +139,11 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('post_joint_rotate_settle_sec', 0.5)
         self.declare_parameter('gripper_settle_sec', 1.0)
 
-        self.declare_parameter('wait_pre_target_timeout_sec', 15.0)
+        # Cartesian step-by-step: each command limited to this distance.
+        # Must be smaller than AirbotWrapper's 0.100 m single-step safety limit.
+        self.declare_parameter('max_cartesian_step', 0.08)
+
+        self.declare_parameter('wait_pre_target_warn_sec', 15.0)
         self.declare_parameter('wait_grasp_target_timeout_sec', 8.0)
         self.declare_parameter('motion_timeout_sec', 12.0)
         self.declare_parameter('set_orientation_timeout_sec', 8.0)
@@ -263,9 +267,20 @@ class GraspTaskOpenLoop(Node):
             self._enter_recover()
 
     def _handle_wait_pre_target(self):
-        if self._state_elapsed() > self._param_float('wait_pre_target_timeout_sec'):
-            self.get_logger().error('WAIT_PRE_TARGET timeout.')
-            self._enter_recover()
+        """Wait for the first stable visual target.
+
+        WAIT_PRE_TARGET is before any grasp motion — no target just means the
+        vision pipeline is not running yet.  We print a periodic warning and
+        keep waiting rather than entering RECOVER.
+        """
+        warn_sec = self._param_float('wait_pre_target_warn_sec')
+        if self._state_elapsed() > warn_sec:
+            self.get_logger().warning(
+                f'Still waiting for stable /visual_target_base in WAIT_PRE_TARGET '
+                f'(elapsed {self._state_elapsed():.1f}s). '
+                f'Clearing stale target window and continuing to wait.')
+            self.target_window.clear()
+            self.state_start_time = self._now_sec()
             return
 
         if self._is_target_stable():
@@ -452,6 +467,14 @@ class GraspTaskOpenLoop(Node):
             )
 
     def _handle_cartesian_motion(self, state_name: str, goal_fn, on_done, timeout_param='motion_timeout_sec'):
+        """Step-by-step Cartesian movement with per-step settle gating.
+
+        Each invocation publishes at most one step_goal (computed via limit_step
+        from current end_pose toward full_goal).  The method never publishes
+        the full final goal directly unless it is already within position_tolerance.
+
+        When full_goal is reached and the settle timer expires, on_done() fires.
+        """
         if self._state_elapsed() > self._param_float(timeout_param):
             self.get_logger().error(f'{state_name} timeout.')
             self._enter_recover()
@@ -463,44 +486,83 @@ class GraspTaskOpenLoop(Node):
         if not self._fresh_end_pose_available():
             return
 
+        # Resolve the full (final) goal every tick so dynamic goals (e.g. lift)
+        # reflect the latest end_pose.
+        full_goal = goal_fn()
+        if full_goal is None or len(full_goal) != 3:
+            self.get_logger().error(f'{state_name}: invalid motion goal.')
+            self._enter_recover()
+            return
+        full_goal = [float(full_goal[0]), float(full_goal[1]), float(full_goal[2])]
+
+        tolerance = self._position_tolerance()
+        distance_to_full = self._distance(self.last_end_pose, full_goal)
+
+        # ---- Already at full goal → settle and finish ----
+        if distance_to_full <= tolerance:
+            if self.settle_start_time is None:
+                self.settle_start_time = self._now_sec()
+                self.get_logger().info(
+                    f'{state_name}: full_goal {self._fmt_xyz(full_goal)} reached '
+                    f'(dist={distance_to_full:.4f}m), settling.')
+                return
+
+            if self._now_sec() - self.settle_start_time >= self._param_float('settle_time_sec'):
+                self.get_logger().info(
+                    f'{state_name}: full_goal reached and settled.')
+                self._reset_stage_vars()
+                on_done()
+            return
+
+        # ---- Not yet sent the next step → compute and publish step_goal ----
         if not self.state_command_sent:
             if not self._executor_accepting():
                 return
-            goal = goal_fn()
-            if goal is None or len(goal) != 3:
-                self.get_logger().error(f'{state_name}: invalid motion goal.')
-                self._enter_recover()
-                return
-            self.active_motion_goal = [float(goal[0]), float(goal[1]), float(goal[2])]
+
+            max_step = self._param_float('max_cartesian_step')
+            step_goal = self.planner.limit_step(
+                self.last_end_pose, full_goal, max_step)
+            self.active_motion_goal = [
+                float(step_goal[0]),
+                float(step_goal[1]),
+                float(step_goal[2]),
+            ]
+
             self._publish_cart_target(self.active_motion_goal)
             self.state_command_sent = True
             self.stage_motion_started = True
             self.settle_start_time = None
+
             self.get_logger().info(
-                f'{state_name}: cartesian command sent once to {self._fmt_xyz(self.active_motion_goal)}.')
+                f'{state_name}: step_goal={self._fmt_xyz(self.active_motion_goal)}, '
+                f'full_goal={self._fmt_xyz(full_goal)}, '
+                f'dist_to_full={distance_to_full:.4f}m.')
             return
 
+        # ---- Step command sent; wait for step_goal ----
         if self.active_motion_goal is None:
             self.get_logger().error(f'{state_name}: active_motion_goal is missing.')
             self._enter_recover()
             return
 
-        distance = self._distance(self.last_end_pose, self.active_motion_goal)
-        tolerance = self._position_tolerance()
-        if distance > tolerance:
+        distance_to_step = self._distance(self.last_end_pose, self.active_motion_goal)
+
+        if distance_to_step > tolerance:
             self.settle_start_time = None
             return
 
         if self.settle_start_time is None:
             self.settle_start_time = self._now_sec()
             self.get_logger().info(
-                f'{state_name}: within tolerance ({distance:.4f}m <= {tolerance:.4f}m), settling.')
+                f'{state_name}: step_goal {self._fmt_xyz(self.active_motion_goal)} reached '
+                f'(dist={distance_to_step:.4f}m), settling before next step.')
             return
 
         if self._now_sec() - self.settle_start_time >= self._param_float('settle_time_sec'):
-            self.get_logger().info(f'{state_name}: reached and settled.')
+            self.get_logger().info(
+                f'{state_name}: step_goal settled; ready for next Cartesian step.')
             self._reset_stage_vars()
-            on_done()
+            return
 
     def _valid_target(self, msg: VisualTarget) -> bool:
         frame_id = msg.header.frame_id.strip()

@@ -85,10 +85,29 @@ RECOVER -> open gripper -> move safe_pose -> IDLE
 
 任务节点会等待两次稳定视觉目标：
 
-- `WAIT_PRE_TARGET`：稳定目标只用于生成预抓取位姿。
+- `WAIT_PRE_TARGET`：稳定目标只用于生成预抓取位姿。**没有视觉目标时不会触发 RECOVER**，
+  只会周期性 warning 并清空旧目标窗口，持续等待 `/visual_target_base`。
 - `WAIT_GRASP_TARGET`：机械臂到达 pre-grasp 并停稳后，重新等待新稳定目标，用于真正抓取。
+  此阶段目标丢失会进入 RECOVER（因为机械臂已离开安全位姿）。
 
 运动阶段中新视觉结果只会更新 `latest_target`，不会修改当前已经下发的 `active_motion_goal`。
+
+## Cartesian 分段运动
+
+所有 Cartesian 运动阶段都会自动按 `max_cartesian_step`（默认 0.08 m）分段执行。
+每次只发布一小步，到位并停稳后才发下一步，绝不直接发送最终目标。
+
+`max_cartesian_step` 必须小于 AirbotWrapper 的 0.100 m 单步安全限制。
+
+以下状态都使用 Cartesian 分段：
+
+- `MOVE_PRE_GRASP`
+- `MOVE_GRASP`
+- `MOVE_LIFT`
+- `MOVE_RETREAT`
+- `RECOVER_RETREAT`
+
+例如 safe_pose 距离当前末端 0.268 m 时，会分成约 4 步执行（0.08 + 0.08 + 0.08 + 0.028）。
 
 ## 关节限位保护
 
