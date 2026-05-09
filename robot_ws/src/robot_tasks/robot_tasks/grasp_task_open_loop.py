@@ -1,175 +1,122 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""方案一：开环抓取任务节点。
+"""Open-loop grasp task with two visual stability confirmations.
 
-该节点实现了一个完整的开环抓取流程，通过 ROS 2 话题与执行层交互。
-主要功能包括：
-- 接收视觉目标 (VisualTarget 消息)
-- 过滤和验证目标（置信度、工作空间检查）
-- 连续 N 帧稳定后锁定 frozen_target
-- 规划分阶段抓取路径 (J6_ROTATE → pre_grasp → grasp → lift → retreat)
-- 执行阶段绝不重复发命令，只用 frozen_target
-- 新视觉结果只缓存为 latest_target，不修改当前阶段目标
-- 监控执行状态并切换状态机
-
-流程：
-  1. WAIT_TARGET: 持续接收视觉目标，连续 N 帧稳定后锁定为 frozen_target
-  2. J6_ROTATE: 关节6旋转补偿，等待速度回落 + post_joint_rotate_settle
-  3. MOVE_PRE_GRASP: 移动到预抓取点（基于 frozen_target），到位停稳后恢复视觉参与
-  4. MOVE_DESCEND: 下降到抓取点
-  5. CLOSE_GRIPPER: 闭合夹爪
-  6. MOVE_LIFT: 抬升
-  7. MOVE_RETREAT: 返回安全位姿
-  8. DONE → IDLE
-
-特点：
-  - 最简单、最容易先跑通
-  - 适合作为保底方案
-  - 不直接冲最终抓取点，必须分阶段执行
-  - 抓取前 joint6 有固定角度补偿
-  - 支持命令串行化，避免重复下发
-  - 到位判定 + 稳定停留，减少抖动
-  - 抓取阶段自动切换慢速档位
-
-依赖：
-  - robot_msgs/VisualTarget: 视觉目标输入
-  - robot_msgs/ArmJointState: 机械臂状态反馈（含 joint_vel）
-  - geometry_msgs/PointStamped: Cartesian 目标输出
-  - std_msgs/Float64MultiArray: 关节目标输出
-  - std_msgs/String: 夹爪指令输出
-
-参数：
-  - stable_frame_count_required: 连续稳定帧数要求
-  - stable_position_threshold_m: 位置稳定阈值 (m)
-  - stable_depth_threshold_m: 深度稳定阈值 (m)
-  - confidence_threshold: 置信度阈值
-  - position_tolerance_m: 到位判定容差 (m)
-  - settle_time_sec: 到位后稳定停留时间 (s)
-  - joint_speed_safe_threshold: J6 安全速度阈值 (rad/s)
-  - post_joint_rotate_settle_sec: J6 旋转后额外稳定时间 (s)
-  - pre_grasp_z_offset / grasp_z_offset / lift_z_offset: Z 偏移
-  - gripper_settle_sec: 夹爪稳定时间
-  - cmd_timeout_sec: 命令超时
-  - loop_hz: 主循环频率
+The task node consumes /visual_target_base in base_link coordinates and sends
+explicit joint/cartesian/gripper/speed commands to arm_executor_node. It does
+not call the AIRBOT SDK and does not perform camera-to-base transforms.
 """
 
-from datetime import datetime, timedelta
+from collections import deque
 import math
+import statistics
+from typing import Optional
 
 import rclpy
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
+from rclpy.time import Time
 from std_msgs.msg import Float64MultiArray, String
 
 from robot_msgs.msg import ArmJointState, VisualTarget
 from robot_tasks.shared.grasp_planner import GraspPlanner
-from robot_tasks.shared.target_filter import TargetFilter
 
 
 class GraspTaskOpenLoop(Node):
-    """开环抓取任务节点 —— 一次识别 + 坐标转换 + 分阶段抓取。
-
-    本节点只通过 ROS topic 与执行层交互，不直接触碰 AIRBOT SDK。
-    """
+    """Two-stage visual-confirmed open-loop grasp state machine."""
 
     def __init__(self):
         super().__init__('grasp_task_open_loop')
-
-        # ---- 加载参数（默认值 + YAML 覆盖） ----
         self._declare_parameters()
 
-        # ---- 共享工具 ----
-        self.filter = TargetFilter(self._config_dict())
         self.planner = GraspPlanner(self._config_dict())
 
-        # ---- 状态机 ----
-        # IDLE → WAIT_TARGET → J6_ROTATE → MOVE_PRE_GRASP → MOVE_DESCEND
-        #   → CLOSE_GRIPPER → MOVE_LIFT → MOVE_RETREAT → DONE → IDLE
         self.task_state = 'IDLE'
-        self.current_stage = None
+        self.state_start_time = self._now_sec()
 
-        # ---- 三层目标分离 ----
-        self.latest_target: VisualTarget = None     # 最新接收到的视觉目标（始终更新）
-        self.frozen_target: VisualTarget = None      # 锁定后的目标（WAIT_TARGET 结束后冻结）
-        self.active_stage_target: list = None        # 当前执行阶段的 Cartesian 路径点
+        self.latest_target: Optional[VisualTarget] = None
+        self.latest_target_time: Optional[float] = None
+        self.pre_target: Optional[list] = None
+        self.grasp_target: Optional[list] = None
+        self.active_motion_goal: Optional[list] = None
+        self.target_window = deque(maxlen=self._stable_frame_count_required())
 
-        # ---- 稳定性跟踪（WAIT_TARGET 阶段） ----
-        self._stable_frame_count = 0
-        self._last_valid_target: VisualTarget = None
-
-        # ---- 命令串行化：每阶段只发一次命令 ----
         self.state_command_sent = False
         self.stage_motion_started = False
-        self.settle_start_time = None               # datetime, 到位后开始稳定的时刻
+        self.settle_start_time: Optional[float] = None
 
-        # ---- J6 旋转后稳定 ----
-        self._j6_speed_safe = False
-        self._j6_settle_start_time = None
+        self.last_end_pose: Optional[list] = None
+        self.last_end_pose_time: Optional[float] = None
+        self.last_joint_pos: Optional[list] = None
+        self.last_joint_vel: Optional[list] = None
+        self.executor_status = 'IDLE'
 
-        # ---- 运行时变量 ----
-        self.last_end_pose = None                   # [x, y, z]
-        self.last_joint_pos = None                  # [j1..j6]
-        self.last_joint_vel = None                  # [j1..j6]
-        self.last_cmd_target = None                 # 最后一次下发的 Cartesian 目标
-        self.last_cmd_time = None                   # 最后一次下发时间
-        self.gripper_closed = False
-        self.gripper_settle_until = None            # 夹爪闭合后等待的截止时间
-        self.lift_target = None                     # 抬升目标（抓取后动态计算）
-        self.joint6_compensated = False             # joint6 补偿是否已执行
+        self.speed_profile_active = 'unknown'
+        self.pending_speed_profile: Optional[str] = None
+        self.gripper_settle_start: Optional[float] = None
+        self.recover_phase = 'OPEN_GRIPPER'
 
-        # ---- 超时 ----
-        self.cmd_timeout = timedelta(seconds=self.get_parameter(
-            'cmd_timeout_sec').value)
-
-        # ---- 速度档位 ----
-        self.speed_profile_active = 'default'
-
-        # ---- 订阅 ----
         self.target_sub = self.create_subscription(
             VisualTarget,
             '/visual_target_base',
             self.target_callback,
             10,
         )
-        self.state_sub = self.create_subscription(
+        self.joint_state_sub = self.create_subscription(
             ArmJointState,
             '/robot_arm/joint_state',
-            self.state_callback,
+            self.joint_state_callback,
+            10,
+        )
+        self.end_pose_sub = self.create_subscription(
+            PoseStamped,
+            '/robot_arm/end_pose',
+            self.end_pose_callback,
+            10,
+        )
+        self.executor_status_sub = self.create_subscription(
+            String,
+            '/robot_arm/executor_status',
+            self.executor_status_callback,
             10,
         )
 
-        # ---- 发布 ----
         self.cart_pub = self.create_publisher(
             PointStamped, '/robot_arm/cart_target', 10)
         self.joint_pub = self.create_publisher(
             Float64MultiArray, '/robot_arm/target_joint', 10)
         self.gripper_pub = self.create_publisher(
             String, '/robot_arm/gripper_cmd', 10)
+        self.speed_pub = self.create_publisher(
+            String, '/robot_arm/speed_profile', 10)
 
-        # ---- 主循环定时器 ----
-        loop_hz = self.get_parameter('loop_hz').value
-        self.timer = self.create_timer(1.0 / loop_hz, self.step_loop)
+        self.timer = self.create_timer(
+            1.0 / float(self.get_parameter('loop_hz').value),
+            self.step_loop,
+        )
 
-        self.get_logger().info('GraspTaskOpenLoop 启动，状态: IDLE')
-
-    # ==================================================================
-    # 参数声明
-    # ==================================================================
+        self.get_logger().info(
+            'GraspTaskOpenLoop started. /visual_target_base must already be in base_link.')
 
     def _declare_parameters(self):
-        """声明所有可调参数及其默认值。"""
-        # ---- 路径点参数 ----
+        self.declare_parameter('base_frame', 'base_link')
+        self.declare_parameter('allow_empty_target_frame', False)
+
         self.declare_parameter('pre_grasp_z_offset', 0.12)
         self.declare_parameter('grasp_z_offset', 0.0)
         self.declare_parameter('lift_z_offset', 0.10)
+        self.declare_parameter('safe_pose', [0.35, 0.0, 0.35])
+        self.declare_parameter('joint6_compensation_deg', 90.0)
 
-        # ---- 置信度与稳定性 ----
         self.declare_parameter('confidence_threshold', 0.7)
+        self.declare_parameter('stable_frame_count', 5)
         self.declare_parameter('stable_frame_count_required', 5)
+        self.declare_parameter('stable_position_threshold', 0.015)
         self.declare_parameter('stable_position_threshold_m', 0.015)
         self.declare_parameter('stable_depth_threshold_m', 0.03)
+        self.declare_parameter('target_timeout_sec', 1.0)
+        self.declare_parameter('end_pose_timeout_sec', 1.0)
 
-        # ---- 工作空间 ----
         self.declare_parameter('workspace_limits.x_min', 0.10)
         self.declare_parameter('workspace_limits.x_max', 1.00)
         self.declare_parameter('workspace_limits.y_min', -0.45)
@@ -177,37 +124,26 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('workspace_limits.z_min', 0.02)
         self.declare_parameter('workspace_limits.z_max', 0.70)
 
-        # ---- 安全位姿 ----
-        self.declare_parameter('safe_pose', [0.35, 0.0, 0.35])
-
-        # ---- Joint6 末端补偿（度） ----
-        self.declare_parameter('joint6_compensation_deg', 90.0)
-
-        # ---- 到位判定与稳定停留 ----
+        self.declare_parameter('position_tolerance', 0.02)
         self.declare_parameter('position_tolerance_m', 0.02)
         self.declare_parameter('settle_time_sec', 0.5)
-
-        # ---- J6 旋转后安全条件 ----
         self.declare_parameter('joint_speed_safe_threshold', 0.1)
         self.declare_parameter('post_joint_rotate_settle_sec', 0.5)
-
-        # ---- 夹爪 ----
         self.declare_parameter('gripper_settle_sec', 1.0)
 
-        # ---- 超时与频率 ----
-        self.declare_parameter('cmd_timeout_sec', 10.0)
-        self.declare_parameter('loop_hz', 4)
+        self.declare_parameter('wait_pre_target_timeout_sec', 15.0)
+        self.declare_parameter('wait_grasp_target_timeout_sec', 8.0)
+        self.declare_parameter('motion_timeout_sec', 12.0)
+        self.declare_parameter('set_orientation_timeout_sec', 8.0)
+        self.declare_parameter('close_gripper_timeout_sec', 4.0)
+        self.declare_parameter('recover_timeout_sec', 15.0)
+        self.declare_parameter('loop_hz', 4.0)
 
     def _config_dict(self) -> dict:
-        """将 ROS 参数组装为共享模块所需的 dict 格式。"""
         return {
             'pre_grasp_z_offset': self.get_parameter('pre_grasp_z_offset').value,
             'grasp_z_offset': self.get_parameter('grasp_z_offset').value,
             'lift_z_offset': self.get_parameter('lift_z_offset').value,
-            'min_confidence_start': self.get_parameter('confidence_threshold').value,
-            'confidence_low': self.get_parameter('confidence_threshold').value * 0.5,
-            'stable_count_required': self.get_parameter('stable_frame_count_required').value,
-            'drift_threshold': self.get_parameter('stable_position_threshold_m').value,
             'safe_pose': self.get_parameter('safe_pose').value,
             'joint6_compensation_deg': self.get_parameter('joint6_compensation_deg').value,
             'workspace_limits': {
@@ -220,142 +156,65 @@ class GraspTaskOpenLoop(Node):
             },
         }
 
-    # ==================================================================
-    # 回调
-    # ==================================================================
-
     def target_callback(self, msg: VisualTarget):
-        """Receive visual target and handle according to current state.
+        if not self._valid_target(msg):
+            return
 
-        - WAIT_TARGET: validate, check stability, freeze after N stable frames
-        - Execution states: only cache as latest_target, never modify frozen_target
-        """
-        try:
-            # 校验 frame_id
-            frame_id = msg.header.frame_id.strip()
-            if frame_id and frame_id != 'base_link':
-                self.get_logger().error(
-                    f'frame_id mismatch: {frame_id}, expected base_link')
-                return
+        self.latest_target = msg
+        self.latest_target_time = self._now_sec()
 
-            # 校验工作空间
-            if not self.filter.in_workspace(msg.x, msg.y, msg.z):
-                self.get_logger().error(
-                    f'Target out of workspace: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f})')
-                return
-
-            # 校验置信度
-            confidence_threshold = self.get_parameter('confidence_threshold').value
-            if msg.confidence < confidence_threshold:
-                self.get_logger().warning(
-                    f'Target confidence too low ({msg.confidence:.2f} < {confidence_threshold:.2f})')
-                return
-
-            # ---- 始终更新 latest_target ----
-            self.latest_target = msg
-
-            self.get_logger().info(
-                f'Received target: ({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f}) '
-                f'confidence={msg.confidence:.2f} depth={msg.depth:.3f}')
-
-            # ---- WAIT_TARGET 阶段：做稳定性判定并冻结 ----
-            if self.task_state == 'WAIT_TARGET':
-                self._check_stability_and_freeze(msg)
-            else:
-                # 执行阶段：只缓存，不修改 frozen_target / active_stage_target
-                self.get_logger().debug(
-                    f'Target received during {self.task_state}, cached as latest_target only')
-
-        except Exception as e:
-            self.get_logger().error(f'target_callback exception: {e}', exc_info=True)
-
-    def state_callback(self, msg: ArmJointState):
-        """Store the latest arm end pose, joint positions, and joint velocities."""
-        try:
-            if msg.end_pose and len(msg.end_pose) >= 3:
-                self.last_end_pose = [msg.end_pose[0],
-                                      msg.end_pose[1],
-                                      msg.end_pose[2]]
-            if msg.joint_pos and len(msg.joint_pos) >= 6:
-                self.last_joint_pos = list(msg.joint_pos)
-            if msg.joint_vel and len(msg.joint_vel) >= 6:
-                self.last_joint_vel = list(msg.joint_vel)
-        except Exception as e:
-            self.get_logger().error(f'state_callback exception: {e}', exc_info=True)
-
-    # ==================================================================
-    # 稳定性判定与目标冻结（仅在 WAIT_TARGET 阶段调用）
-    # ==================================================================
-
-    def _check_stability_and_freeze(self, msg: VisualTarget):
-        """Check if the incoming target is stable vs the previous one.
-
-        Stability criteria:
-        - Position drift < stable_position_threshold_m
-        - Depth drift < stable_depth_threshold_m
-
-        When stable_frame_count_required consecutive frames pass, freeze the target.
-        """
-        stable_pos_th = self.get_parameter('stable_position_threshold_m').value
-        stable_depth_th = self.get_parameter('stable_depth_threshold_m').value
-        required_count = self.get_parameter('stable_frame_count_required').value
-
-        if self._last_valid_target is not None:
-            pos_drift = self._distance_xyz(
-                msg.x, msg.y, msg.z,
-                self._last_valid_target.x,
-                self._last_valid_target.y,
-                self._last_valid_target.z,
-            )
-            depth_drift = abs(msg.depth - self._last_valid_target.depth)
-
-            if pos_drift <= stable_pos_th and depth_drift <= stable_depth_th:
-                self._stable_frame_count += 1
-                self.get_logger().info(
-                    f'Stable frame {self._stable_frame_count}/{required_count} '
-                    f'(pos_drift={pos_drift:.4f}m, depth_drift={depth_drift:.4f}m)')
-            else:
-                # 漂移过大，重置计数
-                self.get_logger().info(
-                    f'Target drifted, resetting stability counter '
-                    f'(pos_drift={pos_drift:.4f}m, depth_drift={depth_drift:.4f}m)')
-                self._stable_frame_count = 1
+        if self.task_state in ('WAIT_PRE_TARGET', 'WAIT_GRASP_TARGET'):
+            self._update_target_window(msg)
         else:
-            self._stable_frame_count = 1
+            self.get_logger().debug(
+                f'Target cached during {self.task_state}; active motion goal is unchanged.')
 
-        self._last_valid_target = msg
+    def joint_state_callback(self, msg: ArmJointState):
+        if msg.joint_pos and len(msg.joint_pos) >= 6:
+            self.last_joint_pos = list(msg.joint_pos)
+        if msg.joint_vel and len(msg.joint_vel) >= 6:
+            self.last_joint_vel = list(msg.joint_vel)
+        if msg.end_pose and len(msg.end_pose) >= 3:
+            self.last_end_pose = [float(msg.end_pose[0]), float(msg.end_pose[1]), float(msg.end_pose[2])]
+            self.last_end_pose_time = self._now_sec()
 
-        if self._stable_frame_count >= required_count:
-            self.frozen_target = msg
-            self.get_logger().info(
-                f'***** TARGET FROZEN after {self._stable_frame_count} stable frames *****\n'
-                f'  position=({msg.x:.3f}, {msg.y:.3f}, {msg.z:.3f})\n'
-                f'  confidence={msg.confidence:.2f}  depth={msg.depth:.3f}')
-            self._stable_frame_count = 0           # 重置供下次使用
-            self._last_valid_target = None
-            self._transition('J6_ROTATE')
+    def end_pose_callback(self, msg: PoseStamped):
+        self.last_end_pose = [
+            float(msg.pose.position.x),
+            float(msg.pose.position.y),
+            float(msg.pose.position.z),
+        ]
+        self.last_end_pose_time = self._now_sec()
 
-    # ==================================================================
-    # 主状态机
-    # ==================================================================
+    def executor_status_callback(self, msg: String):
+        self.executor_status = msg.data.strip().upper()
+        if self.executor_status in ('ERROR', 'TIMEOUT', 'REJECTED_BUSY'):
+            self.get_logger().error(
+                f'Executor status {self.executor_status}; entering RECOVER.')
+            self._enter_recover()
 
     def step_loop(self):
-        """Main state machine, called at loop_hz frequency."""
         try:
+            if self._handle_pending_speed_profile():
+                return
+
             if self.task_state == 'IDLE':
-                self._transition('WAIT_TARGET')
+                self._transition('WAIT_PRE_TARGET', clear_window=True)
 
-            elif self.task_state == 'WAIT_TARGET':
-                pass  # target_callback handles transition to J6_ROTATE
+            elif self.task_state == 'WAIT_PRE_TARGET':
+                self._handle_wait_pre_target()
 
-            elif self.task_state == 'J6_ROTATE':
-                self._handle_j6_rotate()
+            elif self.task_state == 'SET_GRIPPER_ORIENTATION':
+                self._handle_set_gripper_orientation()
 
             elif self.task_state == 'MOVE_PRE_GRASP':
                 self._handle_move_pre_grasp()
 
-            elif self.task_state == 'MOVE_DESCEND':
-                self._handle_move_descend()
+            elif self.task_state == 'WAIT_GRASP_TARGET':
+                self._handle_wait_grasp_target()
+
+            elif self.task_state == 'MOVE_GRASP':
+                self._handle_move_grasp()
 
             elif self.task_state == 'CLOSE_GRIPPER':
                 self._handle_close_gripper()
@@ -366,404 +225,453 @@ class GraspTaskOpenLoop(Node):
             elif self.task_state == 'MOVE_RETREAT':
                 self._handle_move_retreat()
 
-            elif self.task_state == 'DONE':
-                self.get_logger().info('抓取流程完成，返回 IDLE')
-                self._set_speed_profile('default')
-                self._reset_task()
-                self._transition('IDLE')
+            elif self.task_state == 'RECOVER':
+                self._handle_recover()
 
-            elif self.task_state == 'ABORT':
-                self.get_logger().error('任务中止，返回 WAIT_TARGET')
-                self._reset_task()
-                self._transition('WAIT_TARGET')
+        except Exception as exc:
+            self.get_logger().error(f'step_loop exception: {exc}', exc_info=True)
+            self._enter_recover()
 
-        except Exception as e:
-            self.get_logger().error(f'step_loop exception: {e}', exc_info=True)
-            self._reset_task()
-            self._transition('WAIT_TARGET')
+    def _handle_wait_pre_target(self):
+        if self._state_elapsed() > self._param_float('wait_pre_target_timeout_sec'):
+            self.get_logger().error('WAIT_PRE_TARGET timeout.')
+            self._enter_recover()
+            return
 
-    # ------------------------------------------------------------------
-    # J6_ROTATE：关节6旋转补偿
-    # ------------------------------------------------------------------
+        if self._is_target_stable():
+            self.pre_target = self._get_stable_target()
+            self.get_logger().info(
+                f'Pre target stable: {self._fmt_xyz(self.pre_target)}')
+            self._transition('SET_GRIPPER_ORIENTATION')
 
-    def _handle_j6_rotate(self):
-        """J6_ROTATE: send joint6 rotation command once, then wait for
-        joint speed to drop below safe threshold + extra settle time."""
+    def _handle_set_gripper_orientation(self):
+        if self._state_elapsed() > self._param_float('set_orientation_timeout_sec'):
+            self.get_logger().error('SET_GRIPPER_ORIENTATION timeout.')
+            self._enter_recover()
+            return
+
+        if self.pending_speed_profile is not None:
+            return
+
         if self.last_joint_pos is None:
             return
 
-        # ---- 首次进入：下发 J6 旋转指令 ----
         if not self.state_command_sent:
-            if self.joint6_compensated:
-                # 已补偿过，直接跳过
-                self._finish_j6_and_proceed()
+            if not self._executor_accepting():
                 return
-
-            j6_target = self.planner.compute_joint6_target(self.last_joint_pos)
-            if j6_target is None:
-                self.get_logger().error('无法计算 joint6 目标')
-                self._transition('ABORT')
+            joint_target = self.planner.compute_joint6_target(self.last_joint_pos)
+            if joint_target is None:
+                self.get_logger().error('Cannot compute joint6 target.')
+                self._enter_recover()
                 return
-
-            self._publish_joint_target(j6_target)
-            self.state_command_sent = True
-            self.joint6_compensated = True
-            self.get_logger().info('已下发 joint6 补偿指令，等待速度回落')
-            return
-
-        # ---- 等待关节速度降至安全阈值 ----
-        joint_speed_th = self.get_parameter('joint_speed_safe_threshold').value
-        if not self._j6_speed_safe:
-            if self.last_joint_vel is None:
-                return
-            max_speed = max(abs(v) for v in self.last_joint_vel)
-            if max_speed < joint_speed_th:
-                self._j6_speed_safe = True
-                settle_sec = self.get_parameter('post_joint_rotate_settle_sec').value
-                self._j6_settle_start_time = datetime.now() + timedelta(seconds=settle_sec)
-                self.get_logger().info(
-                    f'J6 速度已安全 (max={max_speed:.4f} < {joint_speed_th}), '
-                    f'等待额外稳定 {settle_sec:.1f}s')
-            return
-
-        # ---- 额外稳定等待 ----
-        if self._j6_settle_start_time and datetime.now() >= self._j6_settle_start_time:
-            self._finish_j6_and_proceed()
-
-    def _finish_j6_and_proceed(self):
-        """Clean up J6_ROTATE state and transition to MOVE_PRE_GRASP."""
-        self.get_logger().info('J6_ROTATE 完成，进入 MOVE_PRE_GRASP')
-
-        # 切换到慢速档位
-        self._set_speed_profile('slow')
-
-        # 重置阶段变量
-        self._reset_stage_vars()
-        self.current_stage = 'MOVE_PRE_GRASP'
-        self._transition('MOVE_PRE_GRASP')
-
-    # ------------------------------------------------------------------
-    # MOVE_PRE_GRASP：预抓取阶段
-    # ------------------------------------------------------------------
-
-    def _handle_move_pre_grasp(self):
-        """Move to pre_grasp position based on frozen_target.
-
-        One command only, then wait for position reached + settle.
-        After settlement, resume visual participation for verification.
-        """
-        if self.frozen_target is None:
-            self.get_logger().error('frozen_target is None in MOVE_PRE_GRASP')
-            self._transition('ABORT')
-            return
-
-        self._handle_cartesian_stage(
-            stage_name='MOVE_PRE_GRASP',
-            next_state='MOVE_DESCEND',
-            waypoint_fn=lambda: self._compute_pre_grasp_waypoint(),
-            on_settled_fn=self._on_pre_grasp_settled,
-        )
-
-    def _compute_pre_grasp_waypoint(self) -> list:
-        """Compute pre_grasp waypoint from frozen_target. Called once at stage entry."""
-        target_xyz = [self.frozen_target.x,
-                      self.frozen_target.y,
-                      self.frozen_target.z]
-        return self.planner.compute_pre_grasp(target_xyz)
-
-    def _on_pre_grasp_settled(self):
-        """Called after pre_grasp position is reached and settled.
-
-        Resume visual participation: verify latest_target is still near frozen_target.
-        """
-        if self.latest_target is None:
-            self.get_logger().warning(
-                'No latest_target available after pre_grasp settle, '
-                'proceeding with frozen_target')
-            return True
-
-        drift = self._distance_xyz(
-            self.latest_target.x, self.latest_target.y, self.latest_target.z,
-            self.frozen_target.x, self.frozen_target.y, self.frozen_target.z,
-        )
-        max_drift = self.get_parameter('stable_position_threshold_m').value * 3.0
-        if drift > max_drift:
-            self.get_logger().error(
-                f'Target drifted significantly after pre_grasp: {drift:.4f}m > {max_drift:.3f}m')
-            return False
-        self.get_logger().info(
-            f'Visual verification passed after pre_grasp (drift={drift:.4f}m)')
-        return True
-
-    # ------------------------------------------------------------------
-    # MOVE_DESCEND：下降阶段
-    # ------------------------------------------------------------------
-
-    def _handle_move_descend(self):
-        """Move to grasp position based on frozen_target.
-
-        One command only, then wait for position reached + settle.
-        """
-        if self.frozen_target is None:
-            self.get_logger().error('frozen_target is None in MOVE_DESCEND')
-            self._transition('ABORT')
-            return
-
-        self._handle_cartesian_stage(
-            stage_name='MOVE_DESCEND',
-            next_state='CLOSE_GRIPPER',
-            waypoint_fn=lambda: self._compute_descend_waypoint(),
-        )
-
-    def _compute_descend_waypoint(self) -> list:
-        """Compute grasp waypoint from frozen_target."""
-        target_xyz = [self.frozen_target.x,
-                      self.frozen_target.y,
-                      self.frozen_target.z]
-        return self.planner.compute_grasp(target_xyz)
-
-    # ------------------------------------------------------------------
-    # CLOSE_GRIPPER：夹爪闭合
-    # ------------------------------------------------------------------
-
-    def _handle_close_gripper(self):
-        """Send gripper close command once and wait for settle time."""
-        # ---- 首次进入：下发夹爪指令 ----
-        if not self.state_command_sent:
-            self._publish_gripper_command('close')
-            self.state_command_sent = True
-            settle_sec = self.get_parameter('gripper_settle_sec').value
-            self.gripper_settle_until = datetime.now() + timedelta(seconds=settle_sec)
-            self.get_logger().info(f'夹爪闭合指令已下发，等待 {settle_sec:.1f}s 稳定')
-            return
-
-        # ---- 等待稳定 ----
-        if self.gripper_settle_until and datetime.now() >= self.gripper_settle_until:
-            # 动态计算抬升目标（基于当前末端位置）
-            if self.last_end_pose is not None:
-                self.lift_target = self.planner.compute_lift(self.last_end_pose)
-            else:
-                self.lift_target = self.planner.get_safe_pose()
-            self.get_logger().info(
-                f'夹爪稳定完成，抬升目标: ({self.lift_target[0]:.3f}, '
-                f'{self.lift_target[1]:.3f}, {self.lift_target[2]:.3f})')
-
-            self._reset_stage_vars()
-            self.gripper_closed = True
-            self.current_stage = 'MOVE_LIFT'
-            self._transition('MOVE_LIFT')
-
-    # ------------------------------------------------------------------
-    # MOVE_LIFT：抬升阶段
-    # ------------------------------------------------------------------
-
-    def _handle_move_lift(self):
-        """Lift after grasping. One command only."""
-        if self.lift_target is None:
-            self.get_logger().error('lift_target is None')
-            self._transition('ABORT')
-            return
-
-        self._handle_cartesian_stage(
-            stage_name='MOVE_LIFT',
-            next_state='MOVE_RETREAT',
-            waypoint_fn=lambda: self.lift_target,
-        )
-
-    # ------------------------------------------------------------------
-    # MOVE_RETREAT：撤退阶段
-    # ------------------------------------------------------------------
-
-    def _handle_move_retreat(self):
-        """Retreat to safe pose. One command only."""
-        self._handle_cartesian_stage(
-            stage_name='MOVE_RETREAT',
-            next_state='DONE',
-            waypoint_fn=lambda: self.planner.get_safe_pose(),
-        )
-
-    # ------------------------------------------------------------------
-    # 通用 Cartesian 阶段处理
-    # ------------------------------------------------------------------
-
-    def _handle_cartesian_stage(
-        self,
-        stage_name: str,
-        next_state: str,
-        waypoint_fn,
-        on_settled_fn=None,
-    ):
-        """Generic handler for Cartesian movement stages.
-
-        Guarantees:
-        - Command is published exactly once per stage
-        - active_stage_target is set once at entry and never modified
-        - Position reached check uses position_tolerance_m
-        - After reaching, waits for settle_time_sec
-        - Optionally runs a post-settle verification callback
-
-        Args:
-            stage_name: Name of the current stage for logging
-            next_state: State to transition to after completion
-            waypoint_fn: Callable that returns the Cartesian target [x, y, z]
-            on_settled_fn: Optional callable after settle, return True to proceed
-        """
-        if self.last_end_pose is None:
-            return
-
-        # ---- 首次进入：计算目标并发送命令 ----
-        if not self.state_command_sent:
-            waypoint = waypoint_fn()
-            if waypoint is None:
-                self.get_logger().error(f'{stage_name}: 无法计算路径点')
-                self._transition('ABORT')
-                return
-
-            # 锁定 active_stage_target，整个阶段不再变动
-            self.active_stage_target = list(waypoint)
-
-            self._publish_cart_target(self.active_stage_target)
+            self._publish_joint_target(joint_target)
             self.state_command_sent = True
             self.stage_motion_started = True
-            self.last_cmd_time = datetime.now()
-            self.get_logger().info(
-                f'{stage_name} 启动运动，目标: '
-                f'({self.active_stage_target[0]:.3f}, '
-                f'{self.active_stage_target[1]:.3f}, '
-                f'{self.active_stage_target[2]:.3f})')
+            self.get_logger().info('Joint6 orientation command sent once.')
             return
 
-        # ---- 运动已开始，等待到位 ----
-        pos_tol = self.get_parameter('position_tolerance_m').value
-        distance = self._distance_xyz(
-            self.last_end_pose[0], self.last_end_pose[1], self.last_end_pose[2],
-            self.active_stage_target[0],
-            self.active_stage_target[1],
-            self.active_stage_target[2],
+        if self.last_joint_vel is None:
+            return
+
+        max_speed = max(abs(float(v)) for v in self.last_joint_vel)
+        threshold = self._param_float('joint_speed_safe_threshold')
+        if max_speed > threshold:
+            self.settle_start_time = None
+            return
+
+        if self.settle_start_time is None:
+            self.settle_start_time = self._now_sec()
+            self.get_logger().info(
+                f'Joint speed safe ({max_speed:.4f} < {threshold:.4f}); '
+                f'wait {self._param_float("post_joint_rotate_settle_sec"):.2f}s before pre-grasp.')
+            return
+
+        if self._now_sec() - self.settle_start_time >= self._param_float('post_joint_rotate_settle_sec'):
+            self._set_speed_profile('fast')
+            self._transition('MOVE_PRE_GRASP')
+
+    def _handle_move_pre_grasp(self):
+        if self.pre_target is None:
+            self.get_logger().error('pre_target is missing.')
+            self._enter_recover()
+            return
+        self._handle_cartesian_motion(
+            'MOVE_PRE_GRASP',
+            lambda: self.planner.compute_pre_grasp(self.pre_target),
+            on_done=lambda: self._transition('WAIT_GRASP_TARGET', clear_window=True),
         )
 
-        # 尚未到位
-        if distance > pos_tol:
-            if self.settle_start_time is not None:
-                # 曾经到位过但又漂移出去了，重置稳定计时
-                self.get_logger().debug(
-                    f'{stage_name}: drifted out of tolerance ({distance:.4f}m), resetting settle')
-                self.settle_start_time = None
+    def _handle_wait_grasp_target(self):
+        if self._state_elapsed() > self._param_float('wait_grasp_target_timeout_sec'):
+            self.get_logger().error('WAIT_GRASP_TARGET timeout.')
+            self._enter_recover()
             return
 
-        # 已进入容差范围，开始计时稳定
-        if self.settle_start_time is None:
-            settle_sec = self.get_parameter('settle_time_sec').value
-            self.settle_start_time = datetime.now() + timedelta(seconds=settle_sec)
+        if self._is_target_stable():
+            stable = self._get_stable_target()
+            if self.pre_target is not None:
+                drift = self._distance(stable, self.pre_target)
+                max_drift = self._param_float('stable_position_threshold_m') * 4.0
+                if drift > max_drift:
+                    self.get_logger().error(
+                        f'Grasp target drift too large after pre-grasp: {drift:.4f}m > {max_drift:.4f}m.')
+                    self._enter_recover()
+                    return
+            self.grasp_target = stable
             self.get_logger().info(
-                f'{stage_name} 已到位 (dist={distance:.4f}m), '
-                f'等待稳定 {settle_sec:.1f}s')
+                f'Grasp target stable: {self._fmt_xyz(self.grasp_target)}')
+            self._set_speed_profile('slow')
+            self._transition('MOVE_GRASP')
+
+    def _handle_move_grasp(self):
+        if self.grasp_target is None:
+            self.get_logger().error('grasp_target is missing.')
+            self._enter_recover()
+            return
+        self._handle_cartesian_motion(
+            'MOVE_GRASP',
+            lambda: self.planner.compute_grasp(self.grasp_target),
+            on_done=lambda: self._transition('CLOSE_GRIPPER'),
+        )
+
+    def _handle_close_gripper(self):
+        if self._state_elapsed() > self._param_float('close_gripper_timeout_sec'):
+            self.get_logger().error('CLOSE_GRIPPER timeout.')
+            self._enter_recover()
             return
 
-        # 等待稳定时间到达
-        if datetime.now() < self.settle_start_time:
-            return
-
-        # ---- 到位且稳定：可选的后置验证 ----
-        if on_settled_fn is not None:
-            if not on_settled_fn():
-                self.get_logger().error(f'{stage_name}: post-settle verification failed')
-                self._transition('ABORT')
+        if not self.state_command_sent:
+            if not self._executor_accepting():
                 return
+            self._publish_gripper_command('close')
+            self.state_command_sent = True
+            self.gripper_settle_start = self._now_sec()
+            self.get_logger().info('Gripper close command sent once.')
+            return
 
-        self.get_logger().info(f'{stage_name} 完成，切换到 {next_state}')
+        if self.gripper_settle_start is None:
+            self.gripper_settle_start = self._now_sec()
 
-        # ---- 进入下一阶段 ----
+        if self._now_sec() - self.gripper_settle_start >= self._param_float('gripper_settle_sec'):
+            if not self._fresh_end_pose_available():
+                self.get_logger().error('No fresh end_pose for lift target.')
+                self._enter_recover()
+                return
+            self._transition('MOVE_LIFT')
+
+    def _handle_move_lift(self):
+        if not self._fresh_end_pose_available():
+            if self._state_elapsed() > self._param_float('motion_timeout_sec'):
+                self.get_logger().error('MOVE_LIFT has no fresh end_pose.')
+                self._enter_recover()
+            return
+
+        self._handle_cartesian_motion(
+            'MOVE_LIFT',
+            lambda: self.planner.compute_lift(self.last_end_pose),
+            on_done=lambda: self._transition('MOVE_RETREAT'),
+        )
+
+    def _handle_move_retreat(self):
+        self._set_speed_profile('fast')
+        self._handle_cartesian_motion(
+            'MOVE_RETREAT',
+            lambda: self.planner.get_safe_pose(),
+            on_done=self._finish_cycle,
+        )
+
+    def _handle_recover(self):
+        if self._state_elapsed() > self._param_float('recover_timeout_sec'):
+            self.get_logger().error('RECOVER timeout; reset state to IDLE after best-effort recovery.')
+            self._reset_cycle()
+            self._transition('IDLE')
+            return
+
+        if self.recover_phase == 'OPEN_GRIPPER':
+            if not self.state_command_sent:
+                if not self._executor_accepting():
+                    return
+                self._publish_gripper_command('open')
+                self.state_command_sent = True
+                self.gripper_settle_start = self._now_sec()
+                self.get_logger().warning('RECOVER: open gripper command sent.')
+                return
+            if self._now_sec() - (self.gripper_settle_start or self._now_sec()) < self._param_float('gripper_settle_sec'):
+                return
+            self.recover_phase = 'RETREAT'
+            self._reset_stage_vars()
+            self._set_speed_profile('fast')
+            return
+
+        if self.recover_phase == 'RETREAT':
+            self._handle_cartesian_motion(
+                'RECOVER_RETREAT',
+                lambda: self.planner.get_safe_pose(),
+                on_done=lambda: self._transition('IDLE'),
+                timeout_param='recover_timeout_sec',
+            )
+
+    def _handle_cartesian_motion(self, state_name: str, goal_fn, on_done, timeout_param='motion_timeout_sec'):
+        if self._state_elapsed() > self._param_float(timeout_param):
+            self.get_logger().error(f'{state_name} timeout.')
+            self._enter_recover()
+            return
+
+        if self.pending_speed_profile is not None:
+            return
+
+        if not self._fresh_end_pose_available():
+            return
+
+        if not self.state_command_sent:
+            if not self._executor_accepting():
+                return
+            goal = goal_fn()
+            if goal is None or len(goal) != 3:
+                self.get_logger().error(f'{state_name}: invalid motion goal.')
+                self._enter_recover()
+                return
+            self.active_motion_goal = [float(goal[0]), float(goal[1]), float(goal[2])]
+            self._publish_cart_target(self.active_motion_goal)
+            self.state_command_sent = True
+            self.stage_motion_started = True
+            self.settle_start_time = None
+            self.get_logger().info(
+                f'{state_name}: cartesian command sent once to {self._fmt_xyz(self.active_motion_goal)}.')
+            return
+
+        if self.active_motion_goal is None:
+            self.get_logger().error(f'{state_name}: active_motion_goal is missing.')
+            self._enter_recover()
+            return
+
+        distance = self._distance(self.last_end_pose, self.active_motion_goal)
+        tolerance = self._position_tolerance()
+        if distance > tolerance:
+            self.settle_start_time = None
+            return
+
+        if self.settle_start_time is None:
+            self.settle_start_time = self._now_sec()
+            self.get_logger().info(
+                f'{state_name}: within tolerance ({distance:.4f}m <= {tolerance:.4f}m), settling.')
+            return
+
+        if self._now_sec() - self.settle_start_time >= self._param_float('settle_time_sec'):
+            self.get_logger().info(f'{state_name}: reached and settled.')
+            self._reset_stage_vars()
+            on_done()
+
+    def _valid_target(self, msg: VisualTarget) -> bool:
+        frame_id = msg.header.frame_id.strip()
+        base_frame = self.get_parameter('base_frame').value
+        allow_empty = bool(self.get_parameter('allow_empty_target_frame').value)
+        if frame_id != base_frame and not (allow_empty and frame_id == ''):
+            self.get_logger().warning(
+                f'Reject target frame_id={frame_id!r}; expected {base_frame!r}.')
+            return False
+
+        if not all(math.isfinite(v) for v in (msg.x, msg.y, msg.z)):
+            self.get_logger().warning('Reject target with non-finite coordinates.')
+            return False
+
+        if not self._in_workspace([msg.x, msg.y, msg.z]):
+            self.get_logger().warning(
+                f'Reject target outside workspace: {self._fmt_xyz([msg.x, msg.y, msg.z])}.')
+            return False
+
+        confidence = float(msg.confidence)
+        if math.isfinite(confidence) and confidence < self._param_float('confidence_threshold'):
+            self.get_logger().debug(
+                f'Reject low confidence target: {confidence:.3f}.')
+            return False
+
+        stamp_age = self._message_age_sec(msg)
+        if stamp_age is not None and stamp_age > self._param_float('target_timeout_sec'):
+            self.get_logger().warning(
+                f'Reject stale target: age={stamp_age:.3f}s.')
+            return False
+
+        return True
+
+    def _update_target_window(self, msg: VisualTarget):
+        self.target_window.append({
+            'x': float(msg.x),
+            'y': float(msg.y),
+            'z': float(msg.z),
+            'depth': float(msg.depth),
+            'confidence': float(msg.confidence),
+        })
+
+    def _is_target_stable(self) -> bool:
+        required = self._param_int('stable_frame_count')
+        if len(self.target_window) < required:
+            return False
+
+        stable = self._get_stable_target()
+        max_distance = max(
+            self._distance([entry['x'], entry['y'], entry['z']], stable)
+            for entry in self.target_window
+        )
+        depth_values = [entry['depth'] for entry in self.target_window if math.isfinite(entry['depth'])]
+        max_depth_delta = 0.0
+        if depth_values:
+            median_depth = statistics.median(depth_values)
+            max_depth_delta = max(abs(depth - median_depth) for depth in depth_values)
+
+        stable_position = max_distance <= self._param_float('stable_position_threshold_m')
+        stable_depth = max_depth_delta <= self._param_float('stable_depth_threshold_m')
+        if stable_position and stable_depth:
+            self.get_logger().info(
+                f'Stable target window {len(self.target_window)}/{required}: '
+                f'max_pos={max_distance:.4f}m, max_depth={max_depth_delta:.4f}m.')
+            return True
+        return False
+
+    def _get_stable_target(self) -> list:
+        return [
+            statistics.median(entry['x'] for entry in self.target_window),
+            statistics.median(entry['y'] for entry in self.target_window),
+            statistics.median(entry['z'] for entry in self.target_window),
+        ]
+
+    def _enter_recover(self):
+        if self.task_state == 'RECOVER':
+            return
+        self.pre_target = None
+        self.grasp_target = None
+        self.active_motion_goal = None
+        self.target_window.clear()
+        self.recover_phase = 'OPEN_GRIPPER'
+        self.pending_speed_profile = None
+        self._transition('RECOVER')
+
+    def _finish_cycle(self):
+        self.get_logger().info('Grasp cycle finished; returning to IDLE.')
+        self._reset_cycle()
+        self._set_speed_profile('default')
+        self._transition('IDLE')
+
+    def _reset_cycle(self):
+        self.latest_target = None
+        self.latest_target_time = None
+        self.pre_target = None
+        self.grasp_target = None
+        self.active_motion_goal = None
+        self.target_window.clear()
+        self.pending_speed_profile = None
+        self.recover_phase = 'OPEN_GRIPPER'
+        self.gripper_settle_start = None
         self._reset_stage_vars()
-        self.current_stage = next_state if next_state != 'DONE' else None
-        self._transition(next_state)
-
-    # ==================================================================
-    # 辅助方法
-    # ==================================================================
 
     def _reset_stage_vars(self):
-        """Reset per-stage tracking variables."""
         self.state_command_sent = False
         self.stage_motion_started = False
         self.settle_start_time = None
-        self.active_stage_target = None
-        self._j6_speed_safe = False
-        self._j6_settle_start_time = None
+        self.active_motion_goal = None
 
-    def _transition(self, new_state: str):
-        """状态切换并记录日志。"""
-        old = self.task_state
+    def _transition(self, new_state: str, clear_window: bool = False):
+        old_state = self.task_state
         self.task_state = new_state
-        if old != new_state:
-            self.get_logger().info(f'状态切换: {old} → {new_state}')
-
-    def _reset_task(self):
-        """重置任务运行时变量，准备下一次抓取。"""
-        self.current_stage = None
-        self.frozen_target = None
-        self.latest_target = None
-        self.active_stage_target = None
-        self.last_cmd_target = None
-        self.last_cmd_time = None
-        self.gripper_closed = False
-        self.gripper_settle_until = None
-        self.lift_target = None
-        self.joint6_compensated = False
-        self._stable_frame_count = 0
-        self._last_valid_target = None
+        self.state_start_time = self._now_sec()
         self._reset_stage_vars()
-        self.filter.history.clear()
-
-    # ------------------------------------------------------------------
-    # 指令发布
-    # ------------------------------------------------------------------
+        if clear_window:
+            self.target_window.clear()
+        if old_state != new_state:
+            self.get_logger().info(f'State transition: {old_state} -> {new_state}')
 
     def _set_speed_profile(self, profile: str):
-        """设置执行层速度档位: 'slow' 或 'default'。"""
-        if self.speed_profile_active == profile:
+        profile = profile.lower()
+        if self.speed_profile_active == profile or self.pending_speed_profile == profile:
             return
-        self.speed_profile_active = profile
+        self.pending_speed_profile = profile
+
+    def _handle_pending_speed_profile(self) -> bool:
+        if self.pending_speed_profile is None:
+            return False
+        if not self._executor_accepting():
+            return False
         msg = String()
-        msg.data = profile
-        self.get_logger().info(f'切换速度档位: {profile}')
+        msg.data = self.pending_speed_profile
+        self.speed_pub.publish(msg)
+        self.speed_profile_active = self.pending_speed_profile
+        self.get_logger().info(f'Published speed_profile: {msg.data}')
+        self.pending_speed_profile = None
+        return True
 
     def _publish_cart_target(self, xyz: list):
-        """发布 Cartesian 目标指令到执行层。"""
         msg = PointStamped()
-        msg.header.frame_id = 'base_link'
         msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.get_parameter('base_frame').value
         msg.point.x = float(xyz[0])
         msg.point.y = float(xyz[1])
         msg.point.z = float(xyz[2])
         self.cart_pub.publish(msg)
-        self.last_cmd_target = list(xyz)
-        self.get_logger().info(
-            f'下发 Cartesian: ({xyz[0]:.3f}, {xyz[1]:.3f}, {xyz[2]:.3f})')
 
     def _publish_joint_target(self, joint_pos: list):
-        """发布关节空间指令（用于 joint6 补偿等）。"""
         msg = Float64MultiArray()
         msg.data = [float(v) for v in joint_pos]
         self.joint_pub.publish(msg)
-        self.get_logger().info(f'下发 Joint: {[f"{v:.3f}" for v in joint_pos]}')
 
     def _publish_gripper_command(self, command: str):
-        """发布夹爪指令。"""
         msg = String()
         msg.data = command
         self.gripper_pub.publish(msg)
-        self.get_logger().info(f'下发夹爪指令: {command}')
 
-    # ------------------------------------------------------------------
-    # 数学工具
-    # ------------------------------------------------------------------
+    def _executor_accepting(self) -> bool:
+        return self.executor_status in ('IDLE', 'DONE', '')
+
+    def _fresh_end_pose_available(self) -> bool:
+        if self.last_end_pose is None or self.last_end_pose_time is None:
+            return False
+        return self._now_sec() - self.last_end_pose_time <= self._param_float('end_pose_timeout_sec')
+
+    def _message_age_sec(self, msg: VisualTarget):
+        if msg.header.stamp.sec == 0 and msg.header.stamp.nanosec == 0:
+            return None
+        msg_time = Time.from_msg(msg.header.stamp)
+        return (self.get_clock().now() - msg_time).nanoseconds / 1e9
+
+    def _in_workspace(self, xyz: list) -> bool:
+        return (
+            self.get_parameter('workspace_limits.x_min').value <= xyz[0] <= self.get_parameter('workspace_limits.x_max').value
+            and self.get_parameter('workspace_limits.y_min').value <= xyz[1] <= self.get_parameter('workspace_limits.y_max').value
+            and self.get_parameter('workspace_limits.z_min').value <= xyz[2] <= self.get_parameter('workspace_limits.z_max').value
+        )
+
+    def _state_elapsed(self) -> float:
+        return self._now_sec() - self.state_start_time
+
+    def _now_sec(self) -> float:
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def _position_tolerance(self) -> float:
+        return self._param_float('position_tolerance_m')
+
+    def _param_float(self, name: str) -> float:
+        return float(self.get_parameter(name).value)
+
+    def _param_int(self, name: str) -> int:
+        if name == 'stable_frame_count':
+            return self._stable_frame_count_required()
+        return int(self.get_parameter(name).value)
+
+    def _stable_frame_count_required(self) -> int:
+        value = int(self.get_parameter('stable_frame_count').value)
+        legacy = int(self.get_parameter('stable_frame_count_required').value)
+        return max(1, value if value != 5 else legacy)
 
     @staticmethod
-    def _distance_xyz(x1: float, y1: float, z1: float,
-                      x2: float, y2: float, z2: float) -> float:
-        """3D Euclidean distance."""
-        return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2)
+    def _distance(a: list, b: list) -> float:
+        return math.sqrt(
+            (float(a[0]) - float(b[0])) ** 2
+            + (float(a[1]) - float(b[1])) ** 2
+            + (float(a[2]) - float(b[2])) ** 2
+        )
+
+    @staticmethod
+    def _fmt_xyz(xyz: list) -> str:
+        return f'({float(xyz[0]):.3f}, {float(xyz[1]):.3f}, {float(xyz[2]):.3f})'
 
 
 def main(args=None):

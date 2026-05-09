@@ -1,55 +1,35 @@
-# ===================================================================
-# 方案一：开环抓取参数配置
+# 开环抓取参数配置。
 #
-# 包含节点：arm_executor_node + visual_target_bridge + grasp_task_open_loop
-# 策略：连续 N 帧稳定锁定目标 → 分阶段执行（各阶段只发一次命令）
-# ===================================================================
+# 默认数据流：
+#   Orbbec_ws 直接发布 base_link 坐标系下的 /visual_target_base。
+#   robot_tasks/grasp_task_open_loop 消费该目标，并向
+#   robot_arm_driver/arm_executor_node 下发机械臂命令。
 
-# ---- 执行层：启动时自动初始化 ----
 arm_executor_node:
   ros__parameters:
     do_init: true
     init_joint_pos_deg: [0.0, -45.0, 120.0, -90.0, 90.0, 90.0]
 
-visual_target_bridge:
-  ros__parameters:
-    image_width: 640
-    image_height: 480
-    expected_camera_frame: camera_color_optical_frame
-    min_depth_m: 0.05
-    max_depth_m: 1.50
-    max_camera_jump_m: 0.35
-    max_base_jump_m: 0.60
-    debug_log: true
-    handeye:
-      # OpenCV calibrateHandEye output named cam2gripper: ^gT_c.
-      # If validation proves the saved matrix is actually ^cT_g, switch
-      # direction to gripper_to_camera without changing code.
-      direction: camera_to_gripper
-      translation: [-0.0830395307186257, 0.008112286716840913, 0.08580828291231507]
-      quaternion_xyzw: [-0.49270434706957716, 0.5001884081237661, -0.49995706645552335, 0.5070472507158893]
-
-# ---- 任务层：开环抓取 ----
 grasp_task_open_loop:
   ros__parameters:
-    # ================================================================
-    # 路径点 Z 偏移（米）
-    # ================================================================
-    pre_grasp_z_offset: 0.12       # pre_grasp 在目标上方的高度
-    grasp_z_offset: 0.0            # 抓取点 Z 偏移（0 = 目标本身）
-    lift_z_offset: 0.10            # 抓取后垂直抬升高度
+    base_frame: base_link
+    allow_empty_target_frame: false
 
-    # ================================================================
-    # 目标锁定：置信度 + 连续稳定帧
-    # ================================================================
-    confidence_threshold: 0.7           # 启动抓取的最低置信度
-    stable_frame_count_required: 5      # 需要连续稳定的帧数
-    stable_position_threshold_m: 0.015  # 相邻帧位置漂移上限 (m)
-    stable_depth_threshold_m: 0.03      # 相邻帧深度漂移上限 (m)
+    pre_grasp_z_offset: 0.12
+    grasp_z_offset: 0.0
+    lift_z_offset: 0.10
+    safe_pose: [0.35, 0.0, 0.35]
+    joint6_compensation_deg: 90.0
 
-    # ================================================================
-    # 工作空间边界（base_link 系，米）
-    # ================================================================
+    confidence_threshold: 0.7
+    stable_frame_count: 5
+    stable_frame_count_required: 5
+    stable_position_threshold: 0.015
+    stable_position_threshold_m: 0.015
+    stable_depth_threshold_m: 0.03
+    target_timeout_sec: 1.0
+    end_pose_timeout_sec: 1.0
+
     workspace_limits:
       x_min: 0.10
       x_max: 1.00
@@ -58,32 +38,17 @@ grasp_task_open_loop:
       z_min: 0.02
       z_max: 0.70
 
-    # ================================================================
-    # 安全位姿 & Joint6 补偿
-    # ================================================================
-    safe_pose: [0.35, 0.0, 0.35]
+    position_tolerance: 0.02
+    position_tolerance_m: 0.02
+    settle_time_sec: 0.5
+    joint_speed_safe_threshold: 0.1
+    post_joint_rotate_settle_sec: 0.5
+    gripper_settle_sec: 1.0
 
-    joint6_compensation_deg: 90.0       # Joint6 末端补偿角度（度）
-
-    # ================================================================
-    # 到位判定与稳定停留
-    # ================================================================
-    position_tolerance_m: 0.02          # 距目标小于此值视为到位 (m)
-    settle_time_sec: 0.5                # 到位后还需稳定停留 (s)
-
-    # ================================================================
-    # J6 旋转后安全条件
-    # ================================================================
-    joint_speed_safe_threshold: 0.1     # J6 速度低于此值视为安全 (rad/s)
-    post_joint_rotate_settle_sec: 0.5   # J6 速度安全后的额外稳定时间 (s)
-
-    # ================================================================
-    # 夹爪
-    # ================================================================
-    gripper_settle_sec: 1.0             # 闭合后稳定等待时间 (s)
-
-    # ================================================================
-    # 超时与频率
-    # ================================================================
-    cmd_timeout_sec: 10.0               # 指令超时 (s)
-    loop_hz: 4                          # 状态机主循环频率 (Hz)
+    wait_pre_target_timeout_sec: 15.0
+    wait_grasp_target_timeout_sec: 8.0
+    motion_timeout_sec: 12.0
+    set_orientation_timeout_sec: 8.0
+    close_gripper_timeout_sec: 4.0
+    recover_timeout_sec: 15.0
+    loop_hz: 4.0

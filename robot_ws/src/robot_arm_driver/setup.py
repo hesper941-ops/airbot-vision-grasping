@@ -25,13 +25,6 @@ setup(
     entry_points={
         'console_scripts': [
         'arm_executor_node = robot_arm_driver.arm_executor_node:main',
-        'state_node = robot_arm_driver.state_node:main',
-        'move_node = robot_arm_driver.move_node:main',
-        'gripper_node = robot_arm_driver.gripper_node:main',
-        'cart_move_node = robot_arm_driver.cart_move_node:main',
-        'init_arm = robot_arm_driver.init_arm:main',
-        'sleep_arm = robot_arm_driver.sleep_arm:main',
-        'end_position_publisher = robot_arm_driver.end_position_publisher:main',
         ],
     },
 )

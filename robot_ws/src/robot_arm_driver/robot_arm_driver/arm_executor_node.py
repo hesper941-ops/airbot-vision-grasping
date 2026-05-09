@@ -1,43 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""机械臂执行器节点。
+"""Single-owner AIRBOT executor node.
 
-该节点是机械臂硬件的唯一所有者，负责：
-- 初始化机械臂到工作位姿
-- 接收并执行 Cartesian 和关节空间指令
-- 发布机械臂状态反馈
-- 管理夹爪控制
-- 处理速度档位切换
-
-主要功能：
-- 启动时自动初始化到安全位姿
-- 监听 Cartesian 目标 (/robot_arm/cart_target)
-- 监听关节目标 (/robot_arm/target_joint)
-- 监听夹爪指令 (/robot_arm/gripper_cmd)
-- 发布末端位姿 (/robot_arm/end_pose)
-- 发布关节状态 (/robot_arm/joint_state)
-
-特性：
-- 单线程命令队列，避免并发冲突
-- 忙碌状态拒绝新命令
-- 超时检测和错误恢复
-- 支持慢速/快速档位切换
-
-依赖：
-- geometry_msgs/PointStamped: Cartesian 目标输入
-- std_msgs/Float64MultiArray: 关节目标输入
-- std_msgs/String: 夹爪指令输入
-- geometry_msgs/PoseStamped: 末端位姿输出
-- robot_msgs/ArmJointState: 关节状态输出
-
-参数：
-- do_init: 是否执行初始化
-- init_joint_pos_deg: 初始化关节角度（度）
+This node is the only place that calls the AIRBOT SDK. It accepts one command
+only when the executor is idle. Commands received while a motion is running are
+rejected immediately and are never queued or cached for later execution.
 """
 
 import math
-import queue
 import threading
+from typing import Any
 
 import rclpy
 from geometry_msgs.msg import PointStamped, PoseStamped
@@ -49,145 +21,198 @@ from robot_msgs.msg import ArmJointState
 
 
 class ArmExecutorNode(Node):
-    """启动时自动走到初始工作位姿，然后进入命令监听循环。
-    """
+    """ROS topic facade around the AIRBOT SDK."""
+
+    IDLE = 'IDLE'
+    BUSY = 'BUSY'
+    DONE = 'DONE'
+    ERROR = 'ERROR'
+    REJECTED_BUSY = 'REJECTED_BUSY'
 
     def __init__(self):
         super().__init__('arm_executor_node')
 
-        # ---- 初始化参数 ----
         self.declare_parameter('do_init', True)
-        self.declare_parameter('init_joint_pos_deg', [0.0, -45.0, 120.0, -90.0, 90.0, 90.0])
+        self.declare_parameter(
+            'init_joint_pos_deg',
+            [0.0, -45.0, 120.0, -90.0, 90.0, 90.0],
+        )
 
-        # ---- 连接机械臂（慢速启动，初始化后再切快速） ----
         self.arm = AirbotWrapper(url='localhost', port=50001)
-        self.arm.connect(speed_profile='slow')
-
-        # 启动时自动走到初始工作位姿（慢速，可配置关闭）
-        if self.get_parameter('do_init').value:
-            self._move_to_init_pose()
-
-        # 初始位姿完成后切换到快速，供后续抓取动作使用
-        self.arm.set_speed_profile('default')
-        self.get_logger().info('初始化完成，已切换到默认速度——高速')
-
-        self.sdk_lock = threading.Lock()# 确保 SDK 调用的线程安全，状态发布和命令执行互斥
+        self.sdk_lock = threading.Lock()
+        self.status_lock = threading.Lock()
+        self.executor_state = self.IDLE
+        self.active_thread = None
         self.last_state_msg = None
         self.last_pose_msg = None
 
-        # 命令队列和执行线程，确保串行执行 SDK 调用，避免并发冲突
-        self.command_queue = queue.Queue(maxsize=1)
-        self.stop_event = threading.Event()
-        self.worker = threading.Thread(target=self._command_worker, daemon=True)
-        self.worker.start()
+        self.state_pub = self.create_publisher(
+            ArmJointState, '/robot_arm/joint_state', 10)
+        self.end_pose_pub = self.create_publisher(
+            PoseStamped, '/robot_arm/end_pose', 10)
+        self.executor_status_pub = self.create_publisher(
+            String, '/robot_arm/executor_status', 10)
 
-        # 两套状态 topic：
-        # - ArmJointState：给任务节点（grasp_task_*）做到位判断
-        # - PoseStamped：给 camera_to_base_transform 做手眼矩阵运算（需要四元数）
-        self.state_pub = self.create_publisher(ArmJointState, '/robot_arm/joint_state', 10)
-        self.end_pose_pub = self.create_publisher(PoseStamped, '/robot_arm/end_pose', 10)
+        self.arm.connect(speed_profile='slow')
+        self._publish_executor_status(self.IDLE)
+
+        if self.get_parameter('do_init').value:
+            self._move_to_init_pose()
+
+        with self.sdk_lock:
+            self.arm.set_speed_profile('default')
+        self.get_logger().info(
+            'Arm initialized; executor is ready and speed profile is default.')
+
         self.state_timer = self.create_timer(0.1, self.publish_state)
 
-        # 监听命令 topic，所有命令都通过 _enqueue_command 进入串行执行流程
         self.joint_sub = self.create_subscription(
             Float64MultiArray,
             '/robot_arm/target_joint',
             self.joint_target_callback,
-            10
+            10,
         )
-        # Cartesian 目标监听，frame_id 要求 base_link 或空（默认 base_link）
         self.cart_sub = self.create_subscription(
             PointStamped,
             '/robot_arm/cart_target',
             self.cart_target_callback,
-            10
+            10,
         )
-        # 夹爪命令监听，支持 "open" 和 "close"
         self.gripper_sub = self.create_subscription(
             String,
             '/robot_arm/gripper_cmd',
             self.gripper_callback,
-            10
+            10,
         )
-        # 速度档位切换监听，支持 "slow"、"default" 和 "fast"
         self.speed_sub = self.create_subscription(
             String,
             '/robot_arm/speed_profile',
             self.speed_callback,
-            10
+            10,
         )
 
-        self.get_logger().info('ArmExecutorNode 启动完毕')
-        self.get_logger().info('发布: /robot_arm/joint_state (ArmJointState)(机械臂关节状态) + /robot_arm/end_pose (PoseStamped)(机械臂末端姿态)')
-        self.get_logger().info('监听: /robot_arm/target_joint(机械臂目标关节角), /robot_arm/cart_target(机械臂笛卡尔目标), /robot_arm/gripper_cmd(夹爪命令), /robot_arm/speed_profile(速度档位)')
+        self.get_logger().info(
+            'ArmExecutorNode started. Listening on /robot_arm/target_joint, '
+            '/robot_arm/cart_target, /robot_arm/gripper_cmd, /robot_arm/speed_profile.')
+        self.get_logger().info(
+            'Publishing /robot_arm/joint_state, /robot_arm/end_pose, '
+            '/robot_arm/executor_status.')
 
     def _deg2rad(self, deg: float) -> float:
         return deg * math.pi / 180.0
 
     def _move_to_init_pose(self):
-        """走到初始工作位姿,一开始就执行
-        """
         deg = self.get_parameter('init_joint_pos_deg').value
         rad = [self._deg2rad(v) for v in deg]
-        self.get_logger().info(
-            f'机械臂初始化: 目标关节角(deg)={deg}')
+        self.get_logger().info(f'Moving to init joint pose deg={deg}')
         try:
-            self.arm.get_state()  # 确认连接正常
-            self.arm.move_joints(rad)
-            self.get_logger().info('机械臂已到达初始工作位姿')
-        except Exception as e:
-            self.get_logger().error(f'初始化失败: {e}，继续启动...')
-    
-    def joint_target_callback(self, msg):
-        """Validate and enqueue a joint-space command."""
-        target = list(msg.data)
+            with self.sdk_lock:
+                self._publish_executor_status(self.BUSY)
+                self.arm.get_state()
+                self.arm.move_joints(rad)
+                self._publish_executor_status(self.DONE)
+            self.get_logger().info('Init pose reached.')
+        except Exception as exc:
+            self._set_error(f'Init pose failed: {exc}')
+        finally:
+            if self._get_executor_state() != self.ERROR:
+                self._publish_executor_status(self.IDLE)
+
+    def joint_target_callback(self, msg: Float64MultiArray):
+        target = [float(v) for v in msg.data]
         if len(target) != 6:
-            self.get_logger().error(f'Invalid joint target length: {len(target)} (expected 6)')
+            self.get_logger().error(
+                f'Invalid joint target length: {len(target)} (expected 6).')
             return
-        self._enqueue_command('joint', target)
+        self._try_start_command('joint', target)
 
     def cart_target_callback(self, msg: PointStamped):
-        """Validate and enqueue a single Cartesian step command."""
         frame_id = msg.header.frame_id.strip()
         if frame_id and frame_id != 'base_link':
-            self.get_logger().error(f'Invalid frame_id: {frame_id}, expected base_link')
+            self.get_logger().error(
+                f'Invalid cart target frame_id={frame_id}; expected base_link.')
             return
-
         target = [float(msg.point.x), float(msg.point.y), float(msg.point.z)]
-        self._enqueue_command('cart', target)
+        self._try_start_command('cartesian', target)
 
-    def gripper_callback(self, msg):
-        """Validate and enqueue a gripper command."""
+    def gripper_callback(self, msg: String):
         command = msg.data.strip().lower()
-        if command not in ['open', 'close']:
+        if command not in ('open', 'close'):
             self.get_logger().error(f'Unknown gripper command: {command}')
             return
-        self._enqueue_command('gripper', command)
+        self._try_start_command('gripper', command)
 
-    def speed_callback(self, msg):
-        """运行时切换速度档（slow / default / fast）。"""
+    def speed_callback(self, msg: String):
         profile = msg.data.strip().lower()
         if profile not in ('slow', 'default', 'fast'):
-            self.get_logger().error(f'未知速度档: {profile}')
+            self.get_logger().error(f'Unknown speed profile: {profile}')
             return
-        with self.sdk_lock:
-            self.arm.set_speed_profile(profile)
-        self.get_logger().info(f'速度档切换为: {profile}')
+        self._try_start_command('speed_profile', profile)
+
+    def _try_start_command(self, command_type: str, payload: Any):
+        with self.status_lock:
+            if self.executor_state == self.ERROR:
+                self.get_logger().error(
+                    f'Executor is ERROR; reject {command_type} command.')
+                self._publish_executor_status_locked(self.ERROR)
+                return
+
+            if self.executor_state == self.BUSY:
+                self.get_logger().warning(
+                    f'Executor busy; reject {command_type} command: {payload}')
+                self._publish_executor_status_locked(self.REJECTED_BUSY)
+                self._publish_executor_status_locked(self.BUSY)
+                return
+
+            self.executor_state = self.BUSY
+            self._publish_executor_status_locked(self.BUSY)
+
+        self.get_logger().info(f'Start {command_type} command: {payload}')
+        thread = threading.Thread(
+            target=self._execute_command,
+            args=(command_type, payload),
+            daemon=True,
+        )
+        self.active_thread = thread
+        thread.start()
+
+    def _execute_command(self, command_type: str, payload: Any):
+        try:
+            with self.sdk_lock:
+                if command_type == 'joint':
+                    self.arm.move_joints(payload)
+                elif command_type == 'cartesian':
+                    self.arm.move_to_cart_target_with_current_orientation(payload)
+                elif command_type == 'gripper':
+                    if payload == 'open':
+                        self.arm.open_gripper()
+                    else:
+                        self.arm.close_gripper()
+                elif command_type == 'speed_profile':
+                    self.arm.set_speed_profile(payload)
+                else:
+                    raise ValueError(f'Unsupported command type: {command_type}')
+
+            self.get_logger().info(f'{command_type} command done.')
+            self._publish_executor_status(self.DONE)
+        except Exception as exc:
+            self._set_error(f'{command_type} command failed: {exc}')
+            return
+
+        self._publish_executor_status(self.IDLE)
 
     def publish_state(self):
-        """发布 ArmJointState + PoseStamped,给任务层和坐标变换用。"""
+        """Publish joint state and end-effector pose if the SDK can be sampled."""
         if not self.sdk_lock.acquire(blocking=False):
-            # SDK 正忙（在执行命令），发缓存副本
             if self.last_state_msg is not None:
                 busy_msg = self._copy_state_msg(self.last_state_msg)
-                busy_msg.state = 'BUSY'
+                busy_msg.state = self.BUSY
                 self.state_pub.publish(busy_msg)
             if self.last_pose_msg is not None:
                 self.end_pose_pub.publish(self.last_pose_msg)
             return
 
         try:
-            # ---- ArmJointState ----
             msg = ArmJointState()
             msg.state = str(self.arm.get_state())
             msg.joint_pos = list(self.arm.get_joint_pos())
@@ -201,7 +226,6 @@ class ArmExecutorNode(Node):
             self.last_state_msg = self._copy_state_msg(msg)
             self.state_pub.publish(msg)
 
-            # ---- PoseStamped（给 camera_to_base_transform） ----
             pose_msg = PoseStamped()
             pose_msg.header.stamp = self.get_clock().now().to_msg()
             pose_msg.header.frame_id = 'base_link'
@@ -214,52 +238,30 @@ class ArmExecutorNode(Node):
             pose_msg.pose.orientation.w = float(quaternion[3])
             self.last_pose_msg = pose_msg
             self.end_pose_pub.publish(pose_msg)
-        except Exception as e:
-            self.get_logger().error(f'Failed to publish arm state: {e}')
+        except Exception as exc:
+            self._set_error(f'Failed to publish arm state: {exc}')
         finally:
             self.sdk_lock.release()
 
-    def _enqueue_command(self, command_type, payload):
-        """Accept a one-command buffer and reject bursts while the arm catches up."""
-        try:
-            self.command_queue.put_nowait((command_type, payload))
-            self.get_logger().info(f'Queued {command_type} command: {payload}')
-        except queue.Full:
-            self.get_logger().warning(
-                f'Arm is busy, rejecting {command_type} command: {payload}'
-            )
+    def _get_executor_state(self) -> str:
+        with self.status_lock:
+            return self.executor_state
 
-    def _command_worker(self):
-        """Run blocking SDK commands sequentially in one background worker."""
-        while not self.stop_event.is_set():
-            try:
-                command_type, payload = self.command_queue.get(timeout=0.1)
-            except queue.Empty:
-                continue
+    def _publish_executor_status(self, status: str):
+        with self.status_lock:
+            self._publish_executor_status_locked(status)
 
-            try:
-                with self.sdk_lock:
-                    if command_type == 'joint':
-                        self.arm.move_joints(payload)
-                        self.get_logger().info('Joint command executed.')
-                    elif command_type == 'cart':
-                        self.arm.move_to_cart_target_with_current_orientation(payload)
-                        self.get_logger().info('Cartesian command executed.')
-                    elif command_type == 'gripper':
-                        if payload == 'open':
-                            self.arm.open_gripper()
-                        else:
-                            self.arm.close_gripper()
-                        self.get_logger().info(f'Gripper command executed: {payload}')
-                    else:
-                        self.get_logger().error(f'Unsupported command type: {command_type}')
-            except Exception as e:
-                self.get_logger().error(f'Failed to execute {command_type} command: {e}')
-            finally:
-                self.command_queue.task_done()
+    def _publish_executor_status_locked(self, status: str):
+        self.executor_state = status
+        msg = String()
+        msg.data = status
+        self.executor_status_pub.publish(msg)
 
-    def _copy_state_msg(self, msg):
-        """Copy state messages so cached BUSY publishes cannot mutate old data."""
+    def _set_error(self, message: str):
+        self.get_logger().error(message)
+        self._publish_executor_status(self.ERROR)
+
+    def _copy_state_msg(self, msg: ArmJointState) -> ArmJointState:
         copied = ArmJointState()
         copied.state = msg.state
         copied.joint_pos = list(msg.joint_pos)
@@ -268,10 +270,8 @@ class ArmExecutorNode(Node):
         return copied
 
     def destroy_node(self):
-        """Stop the worker and disconnect the SDK cleanly on shutdown."""
-        self.stop_event.set()
-        if self.worker.is_alive():
-            self.worker.join(timeout=1.0)
+        if self.active_thread is not None and self.active_thread.is_alive():
+            self.active_thread.join(timeout=1.0)
         if self.sdk_lock.acquire(timeout=1.0):
             try:
                 self.arm.disconnect()
@@ -280,7 +280,8 @@ class ArmExecutorNode(Node):
             finally:
                 self.sdk_lock.release()
         else:
-            self.get_logger().warning('SDK command still running, skip disconnect on shutdown.')
+            self.get_logger().warning(
+                'SDK command still running; skip disconnect on shutdown.')
         super().destroy_node()
 
 

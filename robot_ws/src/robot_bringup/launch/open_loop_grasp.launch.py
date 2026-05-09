@@ -1,11 +1,12 @@
-"""方案一：开环抓取启动文件。
+"""Launch the default open-loop grasp pipeline.
 
-启动内容：
-  1. arm_executor_node（执行层，唯一硬件 owner）
-  2. grasp_task_open_loop（任务层，一次识别 + 分阶段抓取）
+Default pipeline:
+  1. arm_executor_node owns the robot hardware.
+  2. Orbbec_ws publishes /visual_target_base in base_link separately.
+  3. grasp_task_open_loop consumes /visual_target_base and sends commands.
 
-使用方法：
-  ros2 launch robot_bringup open_loop_grasp.launch.py
+The old camera-to-base bridge is removed from this flow; publish
+/visual_target_base directly from the vision workspace.
 """
 
 import os
@@ -19,37 +20,21 @@ from launch_ros.actions import Node
 
 
 def generate_launch_description():
-    # 包路径
     bringup_dir = get_package_share_directory('robot_bringup')
-    tasks_dir = get_package_share_directory('robot_tasks')
-
-    # 配置文件路径
     default_config = os.path.join(bringup_dir, 'config', 'open_loop_grasp.yaml')
 
-    # 可覆盖的参数文件路径
     config_arg = DeclareLaunchArgument(
         'config_file',
         default_value=default_config,
-        description='方案一（开环抓取）参数 YAML 文件路径'
+        description='Open-loop grasp parameter YAML file',
     )
 
-    # 包含执行层（arm_executor_node），传入同一份配置文件
-    arm_bringup_launch = os.path.join(
-        bringup_dir, 'launch', 'arm_bringup.launch.py')
     arm_bringup = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(arm_bringup_launch),
+        PythonLaunchDescriptionSource(
+            os.path.join(bringup_dir, 'launch', 'arm_bringup.launch.py')),
         launch_arguments={'config_file': LaunchConfiguration('config_file')}.items(),
     )
 
-    # 开环抓取任务节点
-    bridge_node = Node(
-        package='robot_tasks',
-        executable='visual_target_bridge',
-        name='visual_target_bridge',
-        output='screen',
-        parameters=[LaunchConfiguration('config_file')],
-    )
-    # 开环抓取任务节点，执行一次识别 + 分阶段抓取
     open_loop_node = Node(
         package='robot_tasks',
         executable='grasp_task_open_loop',
@@ -61,6 +46,5 @@ def generate_launch_description():
     return LaunchDescription([
         config_arg,
         arm_bringup,
-        bridge_node,
         open_loop_node,
     ])
