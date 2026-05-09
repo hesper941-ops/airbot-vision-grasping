@@ -3,7 +3,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import PointStamped
 from robot_arm_interface.airbot_wrapper import AirbotWrapper
 
-
+3  #机械臂笛卡尔目标执行节点，监听 /robot_arm/cart_target，要求 frame_id 是 base_link 或空（默认 base_link），直接执行笛卡尔步进命令。
 class ArmCartesianMoveNode(Node):
     """Execution layer node for cartesian step commands.
 
@@ -46,7 +46,6 @@ class ArmCartesianMoveNode(Node):
             self.get_logger().error(f'Failed to execute cartesian target: {e}')
 
     def destroy_node(self):
-        """Disconnect the wrapper cleanly on shutdown."""
         try:
             self.arm.disconnect()
         except Exception:

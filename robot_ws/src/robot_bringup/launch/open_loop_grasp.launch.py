@@ -49,7 +49,7 @@ def generate_launch_description():
         output='screen',
         parameters=[LaunchConfiguration('config_file')],
     )
-
+    # 开环抓取任务节点，执行一次识别 + 分阶段抓取
     open_loop_node = Node(
         package='robot_tasks',
         executable='grasp_task_open_loop',

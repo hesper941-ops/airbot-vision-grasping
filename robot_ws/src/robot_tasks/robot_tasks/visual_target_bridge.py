@@ -28,6 +28,17 @@
 - robot_msgs/VisualTarget: 视觉目标输出 (/visual_target_base)
 
 参数：
+- image_width: 图像宽度 (默认 640)
+- image_height: 图像高度 (默认 480)
+- expected_camera_frame: 期望的相机坐标系 (默认 'camera_color_optical_frame')
+- min_depth_m: 最小深度 (默认 0.05)
+- max_depth_m: 最大深度 (默认 1.50)
+- max_camera_jump_m: 相机坐标系最大跳跃 (默认 0.35)
+- max_base_jump_m: 基座坐标系最大跳跃 (默认 0.60)
+- debug_log: 调试日志 (默认 True)
+- handeye.translation: 手眼标定平移向量
+- handeye.quaternion_xyzw: 手眼标定四元数
+- handeye.direction: 手眼标定方向 (默认 'camera_to_gripper')
 - image_width: 图像宽度（像素）
 - image_height: 图像高度（像素）
 - t_cam2gripper: 相机到夹爪平移向量

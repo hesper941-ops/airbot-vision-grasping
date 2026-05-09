@@ -30,7 +30,7 @@ from typing import Optional
 import math
 from typing import Optional
 
-
+# 该模块依赖于 AirbotWrapper 来获取当前状态和执行路径点命令，确保生成的路径点在机械臂的工作空间内，并且每步移动都在安全范围内。
 class GraspPlanner:
     """根据 3D 视觉目标生成分阶段 Cartesian 路径点。
 

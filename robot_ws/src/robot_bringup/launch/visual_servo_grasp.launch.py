@@ -1,8 +1,8 @@
 """方案二：视觉伺服抓取启动文件。
 
 启动内容：
-  1. arm_executor_node（执行层，唯一硬件 owner）
-  2. grasp_task_visual_servo（任务层，粗定位 + 眼在手上闭环微调）
+  1. arm_executor_node(执行层，唯一硬件 owner)
+  2. grasp_task_visual_servo(任务层,粗定位 + 眼在手上闭环微调）
 
 使用方法：
   ros2 launch robot_bringup visual_servo_grasp.launch.py

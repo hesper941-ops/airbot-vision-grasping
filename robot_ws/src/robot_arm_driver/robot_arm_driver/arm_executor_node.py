@@ -49,10 +49,7 @@ from robot_msgs.msg import ArmJointState
 
 
 class ArmExecutorNode(Node):
-    """唯一硬件 owner，启动时自动走到初始工作位姿，然后进入命令监听循环。
-
-    All real robot commands should pass through this node. Keeping one SDK
-    connection avoids command races between separate ROS nodes.
+    """启动时自动走到初始工作位姿，然后进入命令监听循环。
     """
 
     def __init__(self):
@@ -72,14 +69,13 @@ class ArmExecutorNode(Node):
 
         # 初始位姿完成后切换到快速，供后续抓取动作使用
         self.arm.set_speed_profile('default')
-        self.get_logger().info('初始化完成，已切换到默认速度')
+        self.get_logger().info('初始化完成，已切换到默认速度——高速')
 
-        self.sdk_lock = threading.Lock()
+        self.sdk_lock = threading.Lock()# 确保 SDK 调用的线程安全，状态发布和命令执行互斥
         self.last_state_msg = None
         self.last_pose_msg = None
 
-        # Keep command execution off the ROS callback thread so state publishing
-        # can stay responsive while a motion command is running inside the SDK.
+        # 命令队列和执行线程，确保串行执行 SDK 调用，避免并发冲突
         self.command_queue = queue.Queue(maxsize=1)
         self.stop_event = threading.Event()
         self.worker = threading.Thread(target=self._command_worker, daemon=True)
@@ -92,24 +88,28 @@ class ArmExecutorNode(Node):
         self.end_pose_pub = self.create_publisher(PoseStamped, '/robot_arm/end_pose', 10)
         self.state_timer = self.create_timer(0.1, self.publish_state)
 
+        # 监听命令 topic，所有命令都通过 _enqueue_command 进入串行执行流程
         self.joint_sub = self.create_subscription(
             Float64MultiArray,
             '/robot_arm/target_joint',
             self.joint_target_callback,
             10
         )
+        # Cartesian 目标监听，frame_id 要求 base_link 或空（默认 base_link）
         self.cart_sub = self.create_subscription(
             PointStamped,
             '/robot_arm/cart_target',
             self.cart_target_callback,
             10
         )
+        # 夹爪命令监听，支持 "open" 和 "close"
         self.gripper_sub = self.create_subscription(
             String,
             '/robot_arm/gripper_cmd',
             self.gripper_callback,
             10
         )
+        # 速度档位切换监听，支持 "slow"、"default" 和 "fast"
         self.speed_sub = self.create_subscription(
             String,
             '/robot_arm/speed_profile',
@@ -117,18 +117,15 @@ class ArmExecutorNode(Node):
             10
         )
 
-        self.get_logger().info('ArmExecutorNode 启动完毕（唯一硬件 owner）。')
-        self.get_logger().info('发布: /robot_arm/joint_state (ArmJointState) + /robot_arm/end_pose (PoseStamped)')
-        self.get_logger().info('监听: /robot_arm/target_joint, /robot_arm/cart_target, /robot_arm/gripper_cmd, /robot_arm/speed_profile')
+        self.get_logger().info('ArmExecutorNode 启动完毕')
+        self.get_logger().info('发布: /robot_arm/joint_state (ArmJointState)(机械臂关节状态) + /robot_arm/end_pose (PoseStamped)(机械臂末端姿态)')
+        self.get_logger().info('监听: /robot_arm/target_joint(机械臂目标关节角), /robot_arm/cart_target(机械臂笛卡尔目标), /robot_arm/gripper_cmd(夹爪命令), /robot_arm/speed_profile(速度档位)')
 
     def _deg2rad(self, deg: float) -> float:
         return deg * math.pi / 180.0
 
     def _move_to_init_pose(self):
-        """启动时同步执行：走到初始工作位姿。
-
-        这个操作在 worker 线程启动前同步完成，确保后续命令是在
-        机械臂已就位的基础上执行。
+        """走到初始工作位姿,一开始就执行
         """
         deg = self.get_parameter('init_joint_pos_deg').value
         rad = [self._deg2rad(v) for v in deg]
@@ -140,7 +137,7 @@ class ArmExecutorNode(Node):
             self.get_logger().info('机械臂已到达初始工作位姿')
         except Exception as e:
             self.get_logger().error(f'初始化失败: {e}，继续启动...')
-
+    
     def joint_target_callback(self, msg):
         """Validate and enqueue a joint-space command."""
         target = list(msg.data)
@@ -178,7 +175,7 @@ class ArmExecutorNode(Node):
         self.get_logger().info(f'速度档切换为: {profile}')
 
     def publish_state(self):
-        """发布 ArmJointState + PoseStamped，给任务层和坐标变换用。"""
+        """发布 ArmJointState + PoseStamped,给任务层和坐标变换用。"""
         if not self.sdk_lock.acquire(blocking=False):
             # SDK 正忙（在执行命令），发缓存副本
             if self.last_state_msg is not None:

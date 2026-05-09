@@ -6,7 +6,7 @@ from rclpy.node import Node
 from geometry_msgs.msg import PoseStamped
 from robot_arm_interface.airbot_wrapper import AirbotWrapper
 
-
+# 机械臂末端位姿发布节点，发布 /robot_arm/end_pose (PoseStamped)，frame_id 是 base_link，频率 10Hz，供任务层和坐标变换使用。
 class EndPosePublisher(Node):
     def __init__(self):
         super().__init__('end_pose_publisher')

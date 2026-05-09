@@ -4,7 +4,7 @@ from std_msgs.msg import String
 
 from robot_arm_interface.airbot_wrapper import AirbotWrapper
 
-
+# 机械臂夹爪控制节点，监听 /robot_arm/gripper_cmd，支持 "open" 和 "close" 两个命令，直接执行夹爪开合动作。
 class ArmGripperNode(Node):
     def __init__(self):
         super().__init__('arm_gripper_node')

@@ -4,16 +4,16 @@
 
 该节点实现了一个完整的开环抓取流程，通过 ROS 2 话题与执行层交互。
 主要功能包括：
-- 接收视觉目标（VisualTarget 消息）
+- 接收视觉目标(VisualTarget 消息）
 - 过滤和验证目标（置信度、工作空间检查）
-- 规划分阶段抓取路径（pre_grasp → grasp → lift → retreat）
+- 规划分阶段抓取路径(pre_grasp → grasp → lift → retreat)
 - 串行化下发 Cartesian 和关节指令
 - 监控执行状态并切换状态机
 
 流程：
-  1. 等待 VisualTarget（一次识别 + 坐标转换，已转到 base_link）
+  1. 等待 VisualTarget(一次识别 + 坐标转换，已转到 base_link)
   2. 置信度 / 工作空间检查
-  3. 生成阶段路径点：safe → pre_grasp → grasp → lift
+  3. 生成阶段路径点:safe → pre_grasp → grasp → lift
   4. 分阶段下发 Cartesian 指令到执行层
   5. 通过 /robot_arm/state 确认每步完成
   6. 抓取完成后返回 safe 并进入 DONE
@@ -35,19 +35,32 @@
   - std_msgs/String: 夹爪指令输出
 
 参数：
-  - pre_grasp_z_offset: 预抓取 Z 轴偏移
-  - grasp_z_offset: 抓取 Z 轴偏移
-  - lift_z_offset: 抬升 Z 轴偏移
-  - min_confidence_start: 启动最小置信度
-  - confidence_low: 低置信度阈值
-  - stable_count_required: 稳定性计数要求
-  - drift_threshold: 漂移阈值
-  - workspace_limits: 工作空间限制
-  - safe_pose: 安全位姿
-  - joint6_compensation_deg: joint6 补偿角度
-  - pre_grasp_step: 预抓取步长
-  - descend_step: 下降步长
-  - lift_step: 抬升步长
+  - pre_grasp_z_offset: 预抓取 Z 轴偏移 (默认 0.12)
+  - grasp_z_offset: 抓取 Z 轴偏移 (默认 0.0)
+  - lift_z_offset: 抬升 Z 轴偏移 (默认 0.10)
+  - min_confidence_start: 启动最小置信度 (默认 0.7)
+  - confidence_low: 低置信度阈值 (默认 0.3)
+  - stable_count_required: 稳定性计数要求 (默认 3)
+  - drift_threshold: 漂移阈值 (默认 0.05)
+  - workspace_limits.x_min: 工作空间 X 最小值 (默认 0.10)
+  - workspace_limits.x_max: 工作空间 X 最大值 (默认 1.00)
+  - workspace_limits.y_min: 工作空间 Y 最小值 (默认 -0.45)
+  - workspace_limits.y_max: 工作空间 Y 最大值 (默认 0.50)
+  - workspace_limits.z_min: 工作空间 Z 最小值 (默认 0.02)
+  - workspace_limits.z_max: 工作空间 Z 最大值 (默认 0.70)
+  - safe_pose: 安全位姿 [x, y, z] (默认 [0.35, 0.0, 0.35])
+  - joint6_compensation_deg: joint6 补偿角度 (默认 90.0)
+  - pre_grasp_step: 预抓取步长 (默认 0.10)
+  - descend_step: 下降步长 (默认 0.05)
+  - lift_step: 抬升步长 (默认 0.08)
+  - retreat_step: 后退步长 (默认 0.10)
+  - reach_threshold: 到达判定阈值 (默认 0.03)
+  - gripper_settle_sec: 夹爪稳定时间 (默认 1.0)
+  - cmd_timeout_sec: 命令超时时间 (默认 10.0)
+  - loop_hz: 主循环频率 (默认 4)
+  - position_tolerance_m: 位置容差 (默认 0.02)
+  - min_command_interval_sec: 最小命令间隔 (默认 1.0)
+  - settle_time_sec: 稳定停留时间 (默认 0.5)
   - retreat_step: 后退步长
   - reach_threshold: 到达阈值
   - gripper_settle_sec: 夹爪稳定时间
@@ -264,7 +277,7 @@ class GraspTaskOpenLoop(Node):
     # ==================================================================
 
     def step_loop(self):
-        """Timer-driven state machine main loop."""
+        # 该函数在主循环中定期调用，根据当前状态执行相应的逻辑，并根据条件切换状态。所有与机械臂交互的命令都通过专门的处理函数进行，确保每个阶段的逻辑清晰且易于维护。
         try:
             if self.task_state == 'IDLE':
                 self._transition('WAIT_TARGET')

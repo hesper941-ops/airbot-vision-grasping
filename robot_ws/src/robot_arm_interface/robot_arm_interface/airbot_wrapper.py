@@ -33,11 +33,10 @@ import math
 import time
 from airbot_py.arm import AIRBOTPlay, RobotMode, SpeedProfile
 
-
+# 机械臂安全配置数据类，定义软件限位参数和工作空间边界。
 @dataclass
 class ArmSafetyConfig:
-    """Conservative software guardrails before commands reach the SDK."""
-
+    # 机械臂工作空间边界（单位：米）
     workspace_min: list = field(default_factory=lambda: [0.10, -0.45, 0.02])
     workspace_max: list = field(default_factory=lambda: [1.00, 0.50, 0.70])
     max_cartesian_step: float = 0.10
@@ -52,13 +51,8 @@ class ArmSafetyConfig:
         [-3.1416, 3.1416],
     ])
 
-
+# AIRBOT Python SDK 包装器，提供安全检查和简化接口。
 class AirbotWrapper:
-    """Light wrapper around the AIRBOT Python SDK.
-
-    This layer is the only place in robot_ws that directly touches the SDK.
-    It should expose simple connect/disconnect, state read, and motion helpers.
-    """
 
     def __init__(self, url="localhost", port=50001, safety_config=None):
         self.url = url
@@ -87,40 +81,42 @@ class AirbotWrapper:
         if speed_profile == "slow":
             self.robot.set_speed_profile(SpeedProfile.SLOW)
         elif speed_profile == "fast":
+            # 快速档位，适合非精细操作和大范围移动
             self.robot.set_speed_profile(SpeedProfile.FAST)
         else:
+            # 默认档位，适合大多数操作
             self.robot.set_speed_profile(SpeedProfile.DEFAULT)
 
     def get_state(self):
-        """Return the API state string or object from the SDK."""
+        # 获取当前机械臂状态，包括关节位置、速度和末端位姿等信息。
         return self.robot.get_state()
 
     def get_joint_pos(self):
-        """Read the current joint positions from the robot."""
+        # 获取当前关节位置
         return self.robot.get_joint_pos()
 
     def get_joint_vel(self):
-        """Read the current joint velocities from the robot."""
+        # 获取当前关节速度
         return self.robot.get_joint_vel()
 
     def get_end_pose(self):
-        """Read the current end-effector pose from the robot."""
+        # 获取当前末端位姿，返回值格式为 [position, quaternion]，其中 position 是 [x, y, z]，quaternion 是 [x, y, z, w]。
         return self.robot.get_end_pose()
 
     def move_joints(self, joint_target):
-        """Send a joint-space motion command in planning mode after safety checks."""
+        # 发送一个关节目标到机械臂，执行前进行安全检查。
         self.validate_joint_target(joint_target)
         self.robot.switch_mode(RobotMode.PLANNING_POS)
         self.robot.move_to_joint_pos(joint_target)
 
     def move_cart_waypoints(self, waypoints):
-        """Send a Cartesian waypoint plan to the robot after safety checks."""
+        # 发送一系列笛卡尔路径点到机械臂，执行前进行安全检查。
         self.validate_cart_waypoints(waypoints)
         self.robot.switch_mode(RobotMode.PLANNING_WAYPOINTS)
         self.robot.move_with_cart_waypoints(waypoints)
 
     def move_to_cart_target_with_current_orientation(self, target_xyz):
-        """Move the end-effector to a Cartesian target while preserving orientation."""
+        # 以当前末端位姿的方向，移动到指定的笛卡尔位置，执行前进行安全检查。
         pose = self.get_end_pose()
         if pose is None or len(pose) < 2:
             raise RuntimeError("Failed to read current end pose.")
@@ -130,19 +126,19 @@ class AirbotWrapper:
         ])
 
     def servo_joints(self, joint_target):
-        """Send a direct joint servo command after safety checks."""
+        # 以关节速度模式执行一个关节目标，适合需要快速响应的操作，执行前进行安全检查。
         self.validate_joint_target(joint_target)
         self.robot.switch_mode(RobotMode.SERVO_JOINT_POS)
         self.robot.servo_joint_pos(joint_target)
 
     def go_home(self):
-        """Move the robot to a predefined home joint pose."""
+        # 走到初始工作位姿，通常在启动时执行，确保机械臂处于已知安全位置。
         home_joint = [0.0, -0.785398, 0.785398, 0.0, 0.0, 0.0]
         self.robot.switch_mode(RobotMode.PLANNING_POS)
         self.robot.move_to_joint_pos(home_joint)
 
     def validate_joint_target(self, joint_target):
-        """Reject joint commands outside configured limits or near dangerous states."""
+        #限制关节目标在安全范围内，拒绝任何超出软件限位的命令。
         if joint_target is None or len(joint_target) != len(self.safety.joint_limits):
             raise ValueError("Joint target must contain 6 values.")
 
@@ -157,7 +153,7 @@ class AirbotWrapper:
                 )
 
     def validate_cart_target(self, target_xyz):
-        """Reject Cartesian targets outside the workspace or too far from current pose."""
+        # 验证笛卡尔目标的合法性，包括工作空间检查、步长限制和当前状态检查，拒绝任何不安全的命令。
         if target_xyz is None or len(target_xyz) != 3:
             raise ValueError("Cartesian target must contain x, y, z.")
 
@@ -180,7 +176,7 @@ class AirbotWrapper:
         self._validate_quaternion(quat)
 
     def validate_cart_waypoints(self, waypoints):
-        """Validate every Cartesian waypoint before forwarding it to the SDK."""
+        # 验证一系列笛卡尔路径点的合法性，逐点检查工作空间、步长和当前状态，拒绝任何包含不安全点的路径。
         if not waypoints:
             raise ValueError("Cartesian waypoint list is empty.")
 
@@ -205,7 +201,7 @@ class AirbotWrapper:
             previous_xyz = target_xyz
 
     def _validate_current_joint_state(self):
-        """Check current joint pose and velocity before accepting a new command."""
+        # 在接受新命令前检查当前关节位姿和速度，确保机械臂处于安全状态。
         joint_pos = list(self.get_joint_pos())
         joint_vel = list(self.get_joint_vel())
 
@@ -229,7 +225,7 @@ class AirbotWrapper:
                 )
 
     def _validate_workspace(self, target_xyz):
-        """Check target position against the configured Cartesian workspace."""
+        # 检查目标位置是否在配置的工作空间范围内，拒绝任何超出边界的命令。
         for index, value in enumerate(target_xyz):
             low = self.safety.workspace_min[index]
             high = self.safety.workspace_max[index]
@@ -241,7 +237,7 @@ class AirbotWrapper:
                 )
 
     def _validate_quaternion(self, quat):
-        """Reject malformed orientations before they reach waypoint planning."""
+        # 在接受笛卡尔命令前验证目标姿态的四元数是否合法，拒绝任何格式错误或归一化不正确的命令。
         if len(quat) != 4:
             raise ValueError("Orientation quaternion must contain 4 values.")
 
@@ -250,18 +246,18 @@ class AirbotWrapper:
             raise ValueError(f"Orientation quaternion norm {norm:.3f} is invalid.")
 
     def _distance(self, a, b):
-        """Compute Euclidean distance between two 3D positions."""
+        # 计算两个3D位置之间的欧几里得距离。
         return math.sqrt(sum((float(a[i]) - float(b[i])) ** 2 for i in range(3)))
 
     def open_gripper(self):
-        """Open the gripper by commanding end-effector position."""
+        #打开夹爪通过命令末端位置，通常夹爪打开时末端位置为 0.07 米，执行前进行安全检查。
         self.robot.switch_mode(RobotMode.SERVO_JOINT_POS)
         for _ in range(50):
             self.robot.servo_eef_pos([0.07])
             time.sleep(0.02)
 
     def close_gripper(self):
-        """Close the gripper by commanding end-effector position."""
+        # 关闭夹爪通过命令末端位置，通常夹爪关闭时末端位置为 0.0 米，执行前进行安全检查。
         self.robot.switch_mode(RobotMode.SERVO_JOINT_POS)
         for _ in range(50):
             self.robot.servo_eef_pos([0.0])
