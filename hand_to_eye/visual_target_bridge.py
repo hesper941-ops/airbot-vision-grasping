@@ -216,7 +216,7 @@ class VisualTargetBridge(Node):
     def make_visual_target(self, source_msg: PointStamped, object_name: str, camera_xyz: list, base_xyz: list):
         """Create the VisualTarget consumed by grasp_task_open_loop."""
         target = VisualTarget()
-        target.header.stamp = source_msg.header.stamp
+        target.header.stamp = self.get_clock().now().to_msg()
         target.header.frame_id = 'base_link'
         target.target_id = f'{object_name}_{self.get_clock().now().nanoseconds}'
         target.object_name = object_name
@@ -249,6 +249,7 @@ class VisualTargetBridge(Node):
 
         age = now - self.latest_target.detected_time_sec
         if age <= self.target_hold_sec:
+            self.latest_target.msg.header.stamp = self.get_clock().now().to_msg()
             self.target_pub.publish(self.latest_target.msg)
             self.info_throttled(
                 'holding_target',
