@@ -20,6 +20,8 @@ grasp_task_open_loop:
     lift_z_offset: 0.10
     safe_pose: [0.35, 0.0, 0.35]
     joint6_compensation_deg: 90.0
+    joint6_min_rad: -3.14
+    joint6_max_rad: 3.14
 
     confidence_threshold: 0.7
     stable_frame_count: 5

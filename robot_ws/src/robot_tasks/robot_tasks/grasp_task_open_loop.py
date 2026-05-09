@@ -55,6 +55,7 @@ class GraspTaskOpenLoop(Node):
         self.pending_speed_profile: Optional[str] = None
         self.gripper_settle_start: Optional[float] = None
         self.recover_phase = 'OPEN_GRIPPER'
+        self.reset_executor_sent = False
 
         self.target_sub = self.create_subscription(
             VisualTarget,
@@ -89,6 +90,8 @@ class GraspTaskOpenLoop(Node):
             String, '/robot_arm/gripper_cmd', 10)
         self.speed_pub = self.create_publisher(
             String, '/robot_arm/speed_profile', 10)
+        self.reset_executor_pub = self.create_publisher(
+            String, '/robot_arm/reset_executor', 10)
 
         self.timer = self.create_timer(
             1.0 / float(self.get_parameter('loop_hz').value),
@@ -107,6 +110,8 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('lift_z_offset', 0.10)
         self.declare_parameter('safe_pose', [0.35, 0.0, 0.35])
         self.declare_parameter('joint6_compensation_deg', 90.0)
+        self.declare_parameter('joint6_min_rad', -3.14)
+        self.declare_parameter('joint6_max_rad', 3.14)
 
         self.declare_parameter('confidence_threshold', 0.7)
         self.declare_parameter('stable_frame_count', 5)
@@ -146,6 +151,8 @@ class GraspTaskOpenLoop(Node):
             'lift_z_offset': self.get_parameter('lift_z_offset').value,
             'safe_pose': self.get_parameter('safe_pose').value,
             'joint6_compensation_deg': self.get_parameter('joint6_compensation_deg').value,
+            'joint6_min_rad': self.get_parameter('joint6_min_rad').value,
+            'joint6_max_rad': self.get_parameter('joint6_max_rad').value,
             'workspace_limits': {
                 'x_min': self.get_parameter('workspace_limits.x_min').value,
                 'x_max': self.get_parameter('workspace_limits.x_max').value,
@@ -387,6 +394,13 @@ class GraspTaskOpenLoop(Node):
             self._transition('IDLE')
             return
 
+        if self.executor_status == 'ERROR':
+            if not self.reset_executor_sent:
+                self._publish_reset_executor('clear_error')
+                self.reset_executor_sent = True
+                self.get_logger().warning('RECOVER: requested executor clear_error.')
+            return
+
         if self.recover_phase == 'OPEN_GRIPPER':
             if not self.state_command_sent:
                 if not self._executor_accepting():
@@ -407,7 +421,7 @@ class GraspTaskOpenLoop(Node):
             self._handle_cartesian_motion(
                 'RECOVER_RETREAT',
                 lambda: self.planner.get_safe_pose(),
-                on_done=lambda: self._transition('IDLE'),
+                on_done=self._finish_recover,
                 timeout_param='recover_timeout_sec',
             )
 
@@ -544,7 +558,13 @@ class GraspTaskOpenLoop(Node):
         self.target_window.clear()
         self.recover_phase = 'OPEN_GRIPPER'
         self.pending_speed_profile = None
+        self.reset_executor_sent = False
         self._transition('RECOVER')
+
+    def _finish_recover(self):
+        self.get_logger().info('RECOVER complete; reset cycle and return to IDLE.')
+        self._reset_cycle()
+        self._transition('IDLE')
 
     def _finish_cycle(self):
         self.get_logger().info('Grasp cycle finished; returning to IDLE.')
@@ -562,6 +582,7 @@ class GraspTaskOpenLoop(Node):
         self.pending_speed_profile = None
         self.recover_phase = 'OPEN_GRIPPER'
         self.gripper_settle_start = None
+        self.reset_executor_sent = False
         self._reset_stage_vars()
 
     def _reset_stage_vars(self):
@@ -617,6 +638,11 @@ class GraspTaskOpenLoop(Node):
         msg = String()
         msg.data = command
         self.gripper_pub.publish(msg)
+
+    def _publish_reset_executor(self, command: str):
+        msg = String()
+        msg.data = command
+        self.reset_executor_pub.publish(msg)
 
     def _executor_accepting(self) -> bool:
         return self.executor_status in ('IDLE', 'DONE', '')

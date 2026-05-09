@@ -50,6 +50,7 @@ Topic：`/visual_target_base`
 - `/robot_arm/cart_target` (`geometry_msgs/msg/PointStamped`)
 - `/robot_arm/gripper_cmd` (`std_msgs/msg/String`)
 - `/robot_arm/speed_profile` (`std_msgs/msg/String`)
+- `/robot_arm/reset_executor` (`std_msgs/msg/String`，恢复流程中用于发布 `clear_error`)
 
 执行器状态包括：
 

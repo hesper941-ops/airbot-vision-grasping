@@ -90,10 +90,17 @@ class ArmExecutorNode(Node):
             self.speed_callback,
             10,
         )
+        self.reset_sub = self.create_subscription(
+            String,
+            '/robot_arm/reset_executor',
+            self.reset_callback,
+            10,
+        )
 
         self.get_logger().info(
             'ArmExecutorNode started. Listening on /robot_arm/target_joint, '
-            '/robot_arm/cart_target, /robot_arm/gripper_cmd, /robot_arm/speed_profile.')
+            '/robot_arm/cart_target, /robot_arm/gripper_cmd, /robot_arm/speed_profile, '
+            '/robot_arm/reset_executor.')
         self.get_logger().info(
             'Publishing /robot_arm/joint_state, /robot_arm/end_pose, '
             '/robot_arm/executor_status.')
@@ -149,6 +156,22 @@ class ArmExecutorNode(Node):
             return
         self._try_start_command('speed_profile', profile)
 
+    def reset_callback(self, msg: String):
+        command = msg.data.strip().lower()
+        if command != 'clear_error':
+            self.get_logger().warning(f'Unknown reset_executor command: {command}')
+            return
+
+        with self.status_lock:
+            if self.executor_state != self.ERROR:
+                self.get_logger().info(
+                    f'clear_error received while executor is {self.executor_state}; no state change.')
+                self._publish_executor_status_locked(self.executor_state)
+                return
+
+            self.get_logger().warning('clear_error received; executor ERROR cleared to IDLE.')
+            self._publish_executor_status_locked(self.IDLE)
+
     def _try_start_command(self, command_type: str, payload: Any):
         with self.status_lock:
             if self.executor_state == self.ERROR:
@@ -160,11 +183,13 @@ class ArmExecutorNode(Node):
             if self.executor_state == self.BUSY:
                 self.get_logger().warning(
                     f'Executor busy; reject {command_type} command: {payload}')
+                self.get_logger().warning(f'Executor status: REJECTED_BUSY {command_type}')
                 self._publish_executor_status_locked(self.REJECTED_BUSY)
                 self._publish_executor_status_locked(self.BUSY)
                 return
 
             self.executor_state = self.BUSY
+            self.get_logger().info(f'Executor status: BUSY {command_type}')
             self._publish_executor_status_locked(self.BUSY)
 
         self.get_logger().info(f'Start {command_type} command: {payload}')
@@ -194,6 +219,7 @@ class ArmExecutorNode(Node):
                     raise ValueError(f'Unsupported command type: {command_type}')
 
             self.get_logger().info(f'{command_type} command done.')
+            self.get_logger().info(f'Executor status: DONE {command_type}')
             self._publish_executor_status(self.DONE)
         except Exception as exc:
             self._set_error(f'{command_type} command failed: {exc}')
