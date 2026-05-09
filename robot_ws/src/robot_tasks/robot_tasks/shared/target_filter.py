@@ -1,8 +1,29 @@
 """视觉目标过滤与验证，供两个抓取任务节点共用。
 
-方案一（开环）和方案二（视觉伺服）都需要相同的置信度过滤、
-工作空间检查和稳定性判断。统一放在这里，避免两份拷贝。
+该模块提供视觉目标的预处理和验证功能，包括：
+- 工作空间边界检查
+- 置信度阈值过滤
+- 时间稳定性判断
+- 历史轨迹跟踪
+
+主要用于开环抓取和视觉伺服任务，确保目标可靠后再执行抓取。
+
+过滤逻辑：
+- 工作空间：检查目标是否在允许的 3D 范围内
+- 置信度：高于阈值才接受
+- 稳定性：连续多帧位置变化小于漂移阈值
+
+配置参数：
+- min_confidence_start: 启动最小置信度
+- confidence_low: 低置信度阈值
+- stable_count_required: 稳定性计数要求
+- drift_threshold: 漂移阈值
+- workspace_limits: 工作空间边界 {x_min, x_max, y_min, y_max, z_min, z_max}
 """
+
+from collections import deque
+
+from robot_msgs.msg import VisualTarget
 
 from collections import deque
 

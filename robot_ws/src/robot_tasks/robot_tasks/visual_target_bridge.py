@@ -1,5 +1,38 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""视觉目标桥接节点。
+
+该节点将检测器输出的 PointStamped 消息转换为机器人坐标系下的 VisualTarget 消息。
+主要功能：
+- 接收检测器输出（/duck_position）
+- 接收机械臂末端位姿（/robot_arm/end_pose）
+- 进行坐标变换（相机 → 夹爪 → 基座）
+- 输出 VisualTarget 消息（/visual_target_base）
+
+坐标变换流程：
+1. 检测器输出：相机坐标系下的点 (x, y, z)
+2. 相机到夹爪变换：使用手眼标定外参
+3. 夹爪到基座变换：使用末端位姿
+4. 输出：基座坐标系下的目标点
+
+特性：
+- 缓存最新检测器目标和末端位姿
+- 任意一方先到都不丢消息
+- 两者都可用时立即发布 VisualTarget
+- 检测器持续发布时，桥接持续发布
+- 节流警告日志，避免刷屏
+
+依赖：
+- geometry_msgs/PointStamped: 检测器输入 (/duck_position)
+- geometry_msgs/PoseStamped: 末端位姿输入 (/robot_arm/end_pose)
+- robot_msgs/VisualTarget: 视觉目标输出 (/visual_target_base)
+
+参数：
+- image_width: 图像宽度（像素）
+- image_height: 图像高度（像素）
+- t_cam2gripper: 相机到夹爪平移向量
+- q_cam2gripper: 相机到夹爪旋转四元数
+"""
 
 import math
 

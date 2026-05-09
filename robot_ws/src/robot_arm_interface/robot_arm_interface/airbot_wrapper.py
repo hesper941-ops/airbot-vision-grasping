@@ -1,4 +1,33 @@
 # -*- coding: utf-8 -*-
+"""AIRBOT 机械臂包装器。
+
+该模块提供 AIRBOT Python SDK 的轻量级包装层，实现：
+- 安全检查和软件限位
+- 坐标变换和单位转换
+- 速度档位管理
+- 错误处理和状态监控
+
+主要类：
+- ArmSafetyConfig: 安全配置数据类
+- AirbotWrapper: SDK 包装器主类
+
+功能：
+- 连接和断开机械臂
+- 执行 Cartesian 和关节运动
+- 获取状态反馈
+- 夹爪控制
+- 速度档位切换
+
+安全特性：
+- 工作空间限位检查
+- 关节角度限位检查
+- 最大步长限制
+- 速度限制
+
+依赖：
+- airbot_py: AIRBOT Python SDK
+"""
+
 from dataclasses import dataclass, field
 import math
 import time

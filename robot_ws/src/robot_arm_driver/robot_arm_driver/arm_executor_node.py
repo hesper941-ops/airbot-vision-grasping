@@ -1,3 +1,40 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""机械臂执行器节点。
+
+该节点是机械臂硬件的唯一所有者，负责：
+- 初始化机械臂到工作位姿
+- 接收并执行 Cartesian 和关节空间指令
+- 发布机械臂状态反馈
+- 管理夹爪控制
+- 处理速度档位切换
+
+主要功能：
+- 启动时自动初始化到安全位姿
+- 监听 Cartesian 目标 (/robot_arm/cart_target)
+- 监听关节目标 (/robot_arm/target_joint)
+- 监听夹爪指令 (/robot_arm/gripper_cmd)
+- 发布末端位姿 (/robot_arm/end_pose)
+- 发布关节状态 (/robot_arm/joint_state)
+
+特性：
+- 单线程命令队列，避免并发冲突
+- 忙碌状态拒绝新命令
+- 超时检测和错误恢复
+- 支持慢速/快速档位切换
+
+依赖：
+- geometry_msgs/PointStamped: Cartesian 目标输入
+- std_msgs/Float64MultiArray: 关节目标输入
+- std_msgs/String: 夹爪指令输入
+- geometry_msgs/PoseStamped: 末端位姿输出
+- robot_msgs/ArmJointState: 关节状态输出
+
+参数：
+- do_init: 是否执行初始化
+- init_joint_pos_deg: 初始化关节角度（度）
+"""
+
 import math
 import queue
 import threading

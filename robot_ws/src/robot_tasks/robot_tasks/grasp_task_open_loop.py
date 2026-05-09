@@ -2,6 +2,14 @@
 # -*- coding: utf-8 -*-
 """方案一：开环抓取任务节点。
 
+该节点实现了一个完整的开环抓取流程，通过 ROS 2 话题与执行层交互。
+主要功能包括：
+- 接收视觉目标（VisualTarget 消息）
+- 过滤和验证目标（置信度、工作空间检查）
+- 规划分阶段抓取路径（pre_grasp → grasp → lift → retreat）
+- 串行化下发 Cartesian 和关节指令
+- 监控执行状态并切换状态机
+
 流程：
   1. 等待 VisualTarget（一次识别 + 坐标转换，已转到 base_link）
   2. 置信度 / 工作空间检查
@@ -15,6 +23,39 @@
   - 适合作为保底方案
   - 不直接冲最终抓取点，必须分阶段执行
   - 抓取前 joint6 有固定 90° 补偿
+  - 支持命令串行化，避免重复下发
+  - 到位判定 + 稳定停留，减少抖动
+  - 抓取阶段自动切换慢速档位
+
+依赖：
+  - robot_msgs/VisualTarget: 视觉目标输入
+  - robot_msgs/ArmJointState: 机械臂状态反馈
+  - geometry_msgs/PointStamped: Cartesian 目标输出
+  - std_msgs/Float64MultiArray: 关节目标输出
+  - std_msgs/String: 夹爪指令输出
+
+参数：
+  - pre_grasp_z_offset: 预抓取 Z 轴偏移
+  - grasp_z_offset: 抓取 Z 轴偏移
+  - lift_z_offset: 抬升 Z 轴偏移
+  - min_confidence_start: 启动最小置信度
+  - confidence_low: 低置信度阈值
+  - stable_count_required: 稳定性计数要求
+  - drift_threshold: 漂移阈值
+  - workspace_limits: 工作空间限制
+  - safe_pose: 安全位姿
+  - joint6_compensation_deg: joint6 补偿角度
+  - pre_grasp_step: 预抓取步长
+  - descend_step: 下降步长
+  - lift_step: 抬升步长
+  - retreat_step: 后退步长
+  - reach_threshold: 到达阈值
+  - gripper_settle_sec: 夹爪稳定时间
+  - cmd_timeout_sec: 命令超时时间
+  - loop_hz: 主循环频率
+  - position_tolerance_m: 位置容差
+  - min_command_interval_sec: 最小命令间隔
+  - settle_time_sec: 稳定停留时间
 """
 
 from datetime import datetime, timedelta

@@ -1,8 +1,31 @@
 """抓取路径点规划器，供两个抓取任务节点共用。
 
-方案一（开环）和方案二（视觉伺服）都需要从 base_link 系下的目标坐标
-生成 pre_grasp / grasp / lift / safe 等阶段路径点。
+该模块负责根据 3D 视觉目标生成分阶段 Cartesian 路径点。
+主要用于开环抓取和视觉伺服的粗定位阶段。
+
+规划的路径点包括：
+- pre_grasp: 目标上方预抓取点
+- grasp: 实际抓取点
+- lift: 抓取后抬升点
+- safe: 安全撤退位姿
+
+特性：
+- Z 轴偏移控制抓取深度
+- 工作空间边界检查
+- Joint6 旋转补偿调整夹爪朝向
+- 距离和到达判定计算
+
+配置参数：
+- pre_grasp_z_offset: 预抓取 Z 偏移
+- grasp_z_offset: 抓取 Z 偏移
+- lift_z_offset: 抬升 Z 偏移
+- safe_pose: 安全位姿 [x, y, z]
+- joint6_compensation_deg: Joint6 补偿角度
+- workspace_limits: 工作空间边界
 """
+
+import math
+from typing import Optional
 
 import math
 from typing import Optional
