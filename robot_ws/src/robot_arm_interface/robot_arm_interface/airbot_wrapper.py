@@ -249,16 +249,34 @@ class AirbotWrapper:
         # 计算两个3D位置之间的欧几里得距离。
         return math.sqrt(sum((float(a[i]) - float(b[i])) ** 2 for i in range(3)))
 
-    def open_gripper(self):
-        #打开夹爪通过命令末端位置，通常夹爪打开时末端位置为 0.07 米，执行前进行安全检查。
+    def set_gripper_width(self, width, speed=None):
+        """Command the end-effector opening width in meters."""
+        if self.robot is None:
+            raise RuntimeError("Robot is not connected.")
+
+        target_width = float(width)
+        if target_width < 0.0:
+            raise ValueError("Gripper width must be non-negative.")
+
         self.robot.switch_mode(RobotMode.SERVO_JOINT_POS)
         for _ in range(50):
-            self.robot.servo_eef_pos([0.07])
+            self.robot.servo_eef_pos([target_width])
             time.sleep(0.02)
 
+    def command_gripper(self, command, target_width=0.0, speed=None):
+        """Handle structured gripper commands while keeping open/close aliases."""
+        command = str(command).strip().lower()
+        if command == "open":
+            self.set_gripper_width(0.07, speed)
+        elif command == "close":
+            self.set_gripper_width(target_width, speed)
+        elif command in ("width", "set_width", "set"):
+            self.set_gripper_width(target_width, speed)
+        else:
+            raise ValueError(f"Unknown gripper command: {command}")
+
+    def open_gripper(self):
+        self.command_gripper("open", 0.07)
+
     def close_gripper(self):
-        # 关闭夹爪通过命令末端位置，通常夹爪关闭时末端位置为 0.0 米，执行前进行安全检查。
-        self.robot.switch_mode(RobotMode.SERVO_JOINT_POS)
-        for _ in range(50):
-            self.robot.servo_eef_pos([0.0])
-            time.sleep(0.02)
+        self.command_gripper("close", 0.0)

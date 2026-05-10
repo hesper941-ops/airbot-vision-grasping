@@ -25,6 +25,7 @@ from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray, String
 
 from robot_msgs.msg import ArmJointState, VisualTarget
+from robot_tasks.shared.grasp_planner import GraspPlanner
 
 
 # ===================================================================
@@ -71,11 +72,17 @@ class AutoPickFromBase(Node):
 
     def __init__(self):
         super().__init__('auto_pick_from_base')
+        self.get_logger().warning(
+            'This legacy node is not recommended. Use '
+            'ros2 launch robot_bringup open_loop_grasp.launch.py instead.')
 
         # ---- 通用抓取参数 ----
         self.declare_parameter('pregrasp_z_offset', 0.08)
         self.declare_parameter('lift_z_offset', 0.10)
         self.declare_parameter('joint6_clockwise_delta_deg', -90.0)
+        self.declare_parameter('joint6_compensation_deg', 90.0)
+        self.declare_parameter('joint6_min_rad', -2.9671)
+        self.declare_parameter('joint6_max_rad', 2.9671)
         self.declare_parameter('gripper_open', 1.0)
 
         # ---- 工作空间 ----
@@ -106,6 +113,7 @@ class AutoPickFromBase(Node):
         self.last_cmd_target = None
         self.last_cmd_time = None
         self.done_once = False
+        self.executor_status = 'IDLE'
 
         # 目标滤波缓冲
         self.target_buffer = deque(
@@ -138,6 +146,12 @@ class AutoPickFromBase(Node):
             self.state_callback,
             10
         )
+        self.executor_status_sub = self.create_subscription(
+            String,
+            '/robot_arm/executor_status',
+            self.executor_status_callback,
+            10
+        )
 
         # ---- 发布（执行层接口） ----
         self.cart_pub = self.create_publisher(
@@ -146,6 +160,12 @@ class AutoPickFromBase(Node):
             Float64MultiArray, '/robot_arm/target_joint', 10)
         self.gripper_pub = self.create_publisher(
             String, '/robot_arm/gripper_cmd', 10)
+
+        self.planner = GraspPlanner({
+            'joint6_compensation_deg': self.get_parameter('joint6_compensation_deg').value,
+            'joint6_min_rad': self.get_parameter('joint6_min_rad').value,
+            'joint6_max_rad': self.get_parameter('joint6_max_rad').value,
+        })
 
         # ---- 主循环 ----
         loop_hz = self.get_parameter('loop_hz').value
@@ -213,6 +233,10 @@ class AutoPickFromBase(Node):
                                   msg.end_pose[2]]
         if msg.joint_pos and len(msg.joint_pos) >= 6:
             self.last_joint_pos = list(msg.joint_pos)
+
+    def executor_status_callback(self, msg: String):
+        """Cache executor status so this legacy node does not spam BUSY executor."""
+        self.executor_status = msg.data.strip().upper()
 
     # ==================================================================
     # 主状态机
@@ -418,32 +442,10 @@ class AutoPickFromBase(Node):
             f'  gripper_close={self._gripper_close_value}')
 
     def _compute_joint6_clockwise(self):
-        """计算 joint6 顺时针旋转目标，带限位保护。"""
+        """Compute joint6 target using the shared GraspPlanner safety logic."""
         if self.last_joint_pos is None:
             return None
-
-        delta_deg = self.get_parameter('joint6_clockwise_delta_deg').value
-        j6_deg = math.degrees(self.last_joint_pos[5])
-        target_deg = j6_deg + delta_deg
-
-        j6_min = -170.0
-        j6_max = 170.0
-        margin = 12.0
-
-        if j6_min + margin <= target_deg <= j6_max - margin:
-            target = list(self.last_joint_pos)
-            target[5] = math.radians(target_deg)
-            return target
-        if j6_min <= target_deg <= j6_max:
-            target = list(self.last_joint_pos)
-            target[5] = math.radians(target_deg)
-            self.get_logger().warning('joint6 在硬限位边缘，请留意')
-            return target
-
-        self.get_logger().error(
-            f'joint6 顺时针 -90° 超限: current={j6_deg:.1f}°, '
-            f'target={target_deg:.1f}°')
-        return None
+        return self.planner.compute_joint6_target(self.last_joint_pos)
 
     def _step_toward(self, waypoint: list):
         """朝 waypoint 发一小步。"""
@@ -488,6 +490,9 @@ class AutoPickFromBase(Node):
     # ==================================================================
 
     def _publish_cart_target(self, xyz: list):
+        if not self._executor_accepting():
+            self.get_logger().debug(f'Skip cart command while executor_status={self.executor_status}')
+            return
         msg = PointStamped()
         msg.header.frame_id = 'base_link'
         msg.header.stamp = self.get_clock().now().to_msg()
@@ -499,14 +504,23 @@ class AutoPickFromBase(Node):
             f'→ cart: ({xyz[0]:.3f}, {xyz[1]:.3f}, {xyz[2]:.3f})')
 
     def _publish_joint_target(self, joint_pos: list):
+        if not self._executor_accepting():
+            self.get_logger().debug(f'Skip joint command while executor_status={self.executor_status}')
+            return
         msg = Float64MultiArray()
         msg.data = [float(v) for v in joint_pos]
         self.joint_pub.publish(msg)
 
     def _publish_gripper_command(self, command: str):
+        if not self._executor_accepting():
+            self.get_logger().debug(f'Skip gripper command while executor_status={self.executor_status}')
+            return
         msg = String()
         msg.data = command
         self.gripper_pub.publish(msg)
+
+    def _executor_accepting(self) -> bool:
+        return self.executor_status in ('IDLE', 'DONE', '')
 
 
 def main(args=None):

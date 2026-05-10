@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+"""Legacy debug-only end pose publisher.
+
+This script directly connects to the AIRBOT SDK. It must not be run together
+with robot_arm_driver/arm_executor_node in the main grasp chain because
+arm_executor_node is the single SDK owner and already publishes /robot_arm/end_pose.
+"""
 
 import rclpy
 from rclpy.node import Node
@@ -10,6 +16,11 @@ from airbot_py.arm import AIRBOTPlay
 class EndPosePublisher(Node):
     def __init__(self):
         super().__init__('end_pose_publisher')
+
+        self.get_logger().warning(
+            'LEGACY DEBUG ONLY: end_position_publisher connects directly to the AIRBOT SDK. '
+            'Do not run it with arm_executor_node. Use arm_executor_node /robot_arm/end_pose '
+            'in the main grasp chain.')
 
         self.publisher_ = self.create_publisher(
             PoseStamped,
