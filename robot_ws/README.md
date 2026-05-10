@@ -75,6 +75,66 @@ ros2 launch robot_bringup open_loop_grasp.launch.py
 - `REJECTED_BUSY`
 - `REJECTED_INVALID_JOINT_LIMIT`
 
+## 状态机
+
+```text
+IDLE
+  -> WAIT_PRE_TARGET      (等待第一个稳定视觉目标，不会超时进入 RECOVER)
+  -> SET_GRIPPER_ORIENTATION  (J6 ±90° 旋转补偿)
+  -> MOVE_PRE_GRASP       (分段移动到预抓取点)
+  -> WAIT_GRASP_TARGET    (二次视觉确认，目标丢失会进入 RECOVER)
+  -> MOVE_GRASP           (分段下降到抓取点)
+  -> CLOSE_GRIPPER
+  -> MOVE_LIFT            (分段抬升)
+  -> MOVE_RETREAT         (分段返回 safe_pose)
+  -> IDLE
+```
+
+异常统一进入：
+
+```text
+RECOVER -> clear_error (周期重发) -> open gripper -> move safe_pose (分段) -> IDLE
+```
+
+## Cartesian 分段运动
+
+所有 Cartesian 阶段都自动按 `max_cartesian_step`（默认 0.08 m）分段。每次只发布一小步，到位并停稳后才发下一步，绝不直接发送最终目标。
+
+`max_cartesian_step` 必须小于 AirbotWrapper 的 0.100 m 单步安全限制。
+
+受影响的阶段：`MOVE_PRE_GRASP`、`MOVE_GRASP`、`MOVE_LIFT`、`MOVE_RETREAT`、`RECOVER_RETREAT`。
+
+## WAIT_PRE_TARGET 行为
+
+`WAIT_PRE_TARGET` 是等待第一个视觉目标的阶段，机械臂尚未开始运动。**没有目标时不会触发 RECOVER**，只会周期性 warning（默认 15 s），清空旧目标窗口，并持续等待 `/visual_target_base`。
+
+`WAIT_GRASP_TARGET`（到达 pre-grasp 后的二次确认）目标丢失**会**进入 RECOVER，因为机械臂已离开安全位姿。
+
+## REJECTED_BUSY
+
+单次 `REJECTED_BUSY` 不立即触发 RECOVER。连续达到 `rejected_busy_recover_threshold`（默认 2）后才进入。executor 回到 `IDLE`/`DONE`、任务状态切换、或成功发布命令后计数器清零。
+
+## RECOVER 中 clear_error 周期重发
+
+executor 处于 `ERROR` 时，每 0.5 s 重复发布 `clear_error`，直到 ERROR 清除，避免"只发一次但 executor 未收到"。
+
+## 关节限位保护
+
+`arm_executor_node` 对所有 `/robot_arm/target_joint` 做全关节限位检查。超限的 joint target 被拒绝并发布 `REJECTED_INVALID_JOINT_LIMIT`，**不自动 clamp**（clamp 仅用于 Cartesian waypoint 的工作空间裁剪）。
+
+保守 AIRBOT Play 限位（确认真实硬件后可放宽）：
+
+| 关节 | 角度范围 | 弧度范围 |
+|------|----------|----------|
+| J1 | [-180°, +120°] | [-3.1416, +2.0944] |
+| J2 | [-170°, +10°] | [-2.9671, +0.1745] |
+| J3 | [-5°, +180°] | [-0.0873, +3.1416] |
+| J4 | [-148°, +148°] | [-2.5831, +2.5831] |
+| J5 | [-100°, +100°] | [-1.7453, +1.7453] |
+| J6 | [-170°, +170°] | [-2.9671, +2.9671] |
+
+J6 方向选择：`GraspPlanner.compute_joint6_target()` 同时检测 +90° 和 -90° 两个候选方向，只使用在限位内的方向。都不合法时返回 None，状态机进入 RECOVER。
+
 ## 最小验证
 
 ```bash
@@ -90,3 +150,42 @@ ros2 topic echo /visual_target_base --once
 - CAN 口，例如 `can1`
 - `arm_executor_node`
 - `/robot_arm/executor_status`
+
+## 手动测试
+
+发布假稳定目标（测试状态机）：
+
+```bash
+ros2 topic pub -r 10 /visual_target_base robot_msgs/msg/VisualTarget \
+"{header: {frame_id: 'base_link'}, x: 0.35, y: 0.0, z: 0.12, confidence: 0.90, depth: 0.12, image_width: 640, image_height: 480}"
+```
+
+Cartesian 目标：
+
+```bash
+ros2 topic pub --once /robot_arm/cart_target geometry_msgs/msg/PointStamped \
+"{header: {frame_id: 'base_link'}, point: {x: 0.35, y: 0.0, z: 0.35}}"
+```
+
+合法 joint target：
+
+```bash
+ros2 topic pub --once /robot_arm/target_joint std_msgs/msg/Float64MultiArray \
+"{data: [0.0, -0.785, 2.094, -1.571, 1.571, 1.571]}"
+```
+
+非法 joint target（J2=1.0 > 0.1745，期望被拒绝 `REJECTED_INVALID_JOINT_LIMIT`）：
+
+```bash
+ros2 topic pub --once /robot_arm/target_joint std_msgs/msg/Float64MultiArray \
+"{data: [0.0, 1.0, 2.094, -1.571, 1.571, 1.571]}"
+```
+
+速度 / 夹爪 / clear_error：
+
+```bash
+ros2 topic pub --once /robot_arm/speed_profile std_msgs/msg/String "{data: 'slow'}"
+ros2 topic pub --once /robot_arm/gripper_cmd std_msgs/msg/String "{data: 'open'}"
+ros2 topic pub --once /robot_arm/gripper_cmd std_msgs/msg/String "{data: 'close'}"
+ros2 topic pub --once /robot_arm/reset_executor std_msgs/msg/String "{data: 'clear_error'}"
+```
