@@ -38,8 +38,13 @@ class GraspTaskOpenLoop(Node):
         self.latest_target_time: Optional[float] = None
         self.pre_target: Optional[list] = None
         self.grasp_target: Optional[list] = None
+        self.last_seen_target_base = None
+        self.last_seen_target_time = None
+        self.active_target_base = None
+        self.target_frozen = False
         self.active_motion_goal: Optional[list] = None
         self.target_window = deque(maxlen=self._stable_frame_count_required())
+        self.last_visual_lost_warning_time: Optional[float] = None
 
         self.state_command_sent = False
         self.stage_motion_started = False
@@ -124,6 +129,12 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('stable_depth_threshold_m', 0.03)
         self.declare_parameter('target_timeout_sec', 1.0)
         self.declare_parameter('end_pose_timeout_sec', 1.0)
+        self.declare_parameter('use_last_seen_target_on_loss', True)
+        self.declare_parameter('visual_lost_grace_sec', 0.5)
+        self.declare_parameter('last_seen_target_max_age_sec', 5.0)
+        self.declare_parameter('update_target_during_motion', True)
+        self.declare_parameter('freeze_target_before_close', True)
+        self.declare_parameter('require_second_visual_confirm', False)
 
         self.declare_parameter('workspace_limits.x_min', 0.10)
         self.declare_parameter('workspace_limits.x_max', 1.00)
@@ -177,12 +188,33 @@ class GraspTaskOpenLoop(Node):
 
         self.latest_target = msg
         self.latest_target_time = self._now_sec()
+        target_base = [float(msg.x), float(msg.y), float(msg.z)]
+        self.last_seen_target_base = target_base
+        self.last_seen_target_time = self.latest_target_time
 
         if self.task_state in ('WAIT_PRE_TARGET', 'WAIT_GRASP_TARGET'):
             self._update_target_window(msg)
-        else:
+
+        updatable_states = (
+            'WAIT_PRE_TARGET',
+            'SET_GRIPPER_ORIENTATION',
+            'MOVE_PRE_GRASP',
+            'MOVE_GRASP',
+        )
+        can_update_during_motion = bool(
+            self.get_parameter('update_target_during_motion').value)
+        if (
+            self.task_state in updatable_states
+            and not self.target_frozen
+            and (
+                can_update_during_motion
+                or self.task_state in ('WAIT_PRE_TARGET', 'SET_GRIPPER_ORIENTATION')
+            )
+        ):
+            self.active_target_base = target_base
+        elif self.task_state not in ('WAIT_PRE_TARGET', 'WAIT_GRASP_TARGET'):
             self.get_logger().debug(
-                f'Target cached during {self.task_state}; active motion goal is unchanged.')
+                f'Target cached during {self.task_state}; active target is unchanged.')
 
     def joint_state_callback(self, msg: ArmJointState):
         if msg.joint_pos and len(msg.joint_pos) >= 6:
@@ -285,6 +317,8 @@ class GraspTaskOpenLoop(Node):
 
         if self._is_target_stable():
             self.pre_target = self._get_stable_target()
+            if not self.target_frozen:
+                self.active_target_base = list(self.pre_target)
             self.get_logger().info(
                 f'Pre target stable: {self._fmt_xyz(self.pre_target)}')
             self._transition('SET_GRIPPER_ORIENTATION')
@@ -336,14 +370,10 @@ class GraspTaskOpenLoop(Node):
             self._transition('MOVE_PRE_GRASP')
 
     def _handle_move_pre_grasp(self):
-        if self.pre_target is None:
-            self.get_logger().error('pre_target is missing.')
-            self._enter_recover()
-            return
         self._handle_cartesian_motion(
             'MOVE_PRE_GRASP',
-            lambda: self.planner.compute_pre_grasp(self.pre_target),
-            on_done=lambda: self._transition('WAIT_GRASP_TARGET', clear_window=True),
+            lambda: self._compute_pre_grasp_from_active_target(),
+            on_done=self._after_move_pre_grasp,
         )
 
     def _handle_wait_grasp_target(self):
@@ -363,21 +393,98 @@ class GraspTaskOpenLoop(Node):
                     self._enter_recover()
                     return
             self.grasp_target = stable
+            if not self.target_frozen:
+                self.active_target_base = list(self.grasp_target)
             self.get_logger().info(
                 f'Grasp target stable: {self._fmt_xyz(self.grasp_target)}')
             self._set_speed_profile('slow')
             self._transition('MOVE_GRASP')
 
-    def _handle_move_grasp(self):
-        if self.grasp_target is None:
-            self.get_logger().error('grasp_target is missing.')
-            self._enter_recover()
+    def _after_move_pre_grasp(self):
+        if bool(self.get_parameter('require_second_visual_confirm').value):
+            self._transition('WAIT_GRASP_TARGET', clear_window=True)
             return
+
+        self._set_speed_profile('slow')
+        self._transition('MOVE_GRASP')
+
+    def _handle_move_grasp(self):
         self._handle_cartesian_motion(
             'MOVE_GRASP',
-            lambda: self.planner.compute_grasp(self.grasp_target),
-            on_done=lambda: self._transition('CLOSE_GRIPPER'),
+            lambda: self._compute_grasp_from_active_target(),
+            on_done=self._after_move_grasp,
         )
+
+    def _after_move_grasp(self):
+        if bool(self.get_parameter('freeze_target_before_close').value):
+            target = self._get_active_target_or_last_seen()
+            if target is None:
+                self.get_logger().error(
+                    'Cannot freeze target before close: no valid active or last-seen base target.')
+                self._enter_recover()
+                return
+            self.active_target_base = list(target)
+            self.target_frozen = True
+            self.get_logger().info(
+                f'Target frozen before close: {self._fmt_xyz(self.active_target_base)}')
+        self._transition('CLOSE_GRIPPER')
+
+    def _compute_pre_grasp_from_active_target(self):
+        target = self._get_active_target_or_last_seen()
+        if target is None:
+            return None
+        self.pre_target = list(target)
+        return self.planner.compute_pre_grasp(target)
+
+    def _compute_grasp_from_active_target(self):
+        target = self._get_active_target_or_last_seen()
+        if target is None:
+            return None
+        self.grasp_target = list(target)
+        return self.planner.compute_grasp(target)
+
+    def _get_active_target_or_last_seen(self):
+        now = self._now_sec()
+        max_age = self._param_float('last_seen_target_max_age_sec')
+        grace_sec = self._param_float('visual_lost_grace_sec')
+
+        if self.last_seen_target_base is None or self.last_seen_target_time is None:
+            self.get_logger().error('No last-seen /visual_target_base available.')
+            return None
+
+        age = now - self.last_seen_target_time
+        if age > max_age:
+            self.get_logger().error(
+                f'Last-seen base target is too old: age={age:.2f}s > {max_age:.2f}s.')
+            return None
+
+        use_last_seen = bool(self.get_parameter('use_last_seen_target_on_loss').value)
+        if self.active_target_base is not None and not self.target_frozen:
+            if age <= grace_sec:
+                return list(self.active_target_base)
+            if not use_last_seen:
+                self.get_logger().error('Visual target lost and last-seen fallback is disabled.')
+                return None
+            self._warn_visual_lost(age)
+            return list(self.active_target_base)
+
+        if not use_last_seen:
+            self.get_logger().error('Visual target lost and last-seen fallback is disabled.')
+            return None
+
+        if age > grace_sec:
+            self._warn_visual_lost(age)
+        return list(self.last_seen_target_base)
+
+    def _warn_visual_lost(self, age: float):
+        now = self._now_sec()
+        if (
+            self.last_visual_lost_warning_time is None
+            or now - self.last_visual_lost_warning_time >= 1.0
+        ):
+            self.get_logger().warning(
+                'Visual target temporarily lost; using last seen base target.')
+            self.last_visual_lost_warning_time = now
 
     def _handle_close_gripper(self):
         if self._state_elapsed() > self._param_float('close_gripper_timeout_sec'):
@@ -642,6 +749,8 @@ class GraspTaskOpenLoop(Node):
             return
         self.pre_target = None
         self.grasp_target = None
+        self.active_target_base = None
+        self.target_frozen = False
         self.active_motion_goal = None
         self.target_window.clear()
         self.recover_phase = 'OPEN_GRIPPER'
@@ -666,6 +775,10 @@ class GraspTaskOpenLoop(Node):
         self.latest_target_time = None
         self.pre_target = None
         self.grasp_target = None
+        self.last_seen_target_base = None
+        self.last_seen_target_time = None
+        self.active_target_base = None
+        self.target_frozen = False
         self.active_motion_goal = None
         self.target_window.clear()
         self.pending_speed_profile = None
@@ -673,6 +786,7 @@ class GraspTaskOpenLoop(Node):
         self.gripper_settle_start = None
         self.last_reset_executor_time = None
         self.rejected_busy_count = 0
+        self.last_visual_lost_warning_time = None
         self._reset_stage_vars()
 
     def _reset_stage_vars(self):

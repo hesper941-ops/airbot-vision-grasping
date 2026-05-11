@@ -40,6 +40,12 @@ grasp_task_open_loop:
     stable_depth_threshold_m: 0.03
     target_timeout_sec: 1.0
     end_pose_timeout_sec: 1.0
+    use_last_seen_target_on_loss: true
+    visual_lost_grace_sec: 0.5
+    last_seen_target_max_age_sec: 5.0
+    update_target_during_motion: true
+    freeze_target_before_close: true
+    require_second_visual_confirm: false
 
     workspace_limits:
       x_min: 0.10

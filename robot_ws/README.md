@@ -82,7 +82,6 @@ IDLE
   -> WAIT_PRE_TARGET      (等待第一个稳定视觉目标，不会超时进入 RECOVER)
   -> SET_GRIPPER_ORIENTATION  (J6 ±90° 旋转补偿)
   -> MOVE_PRE_GRASP       (分段移动到预抓取点)
-  -> WAIT_GRASP_TARGET    (二次视觉确认，目标丢失会进入 RECOVER)
   -> MOVE_GRASP           (分段下降到抓取点)
   -> CLOSE_GRIPPER
   -> MOVE_LIFT            (分段抬升)
@@ -90,11 +89,19 @@ IDLE
   -> IDLE
 ```
 
+`require_second_visual_confirm=true` 时，`MOVE_PRE_GRASP` 和 `MOVE_GRASP` 之间会额外启用 `WAIT_GRASP_TARGET` 二次视觉确认。
+
 异常统一进入：
 
 ```text
 RECOVER -> clear_error (周期重发) -> open gripper -> move safe_pose (分段) -> IDLE
 ```
+
+## 眼在手上目标策略
+
+当前眼在手上抓取策略为：分段靠近过程中，如果视觉还能看到目标，就持续更新 `base_link` 下的目标坐标；如果目标短暂离开视野，则使用最后一次看到的 `base_link` 坐标继续执行；如果丢失时间过长，则进入恢复流程。
+
+任务层只保存 `/visual_target_base` 的 `base_link` 坐标作为 last-seen fallback。视觉层不伪造旧目标，只发布真实检测到的新目标。
 
 ## Cartesian 分段运动
 
@@ -108,7 +115,7 @@ RECOVER -> clear_error (周期重发) -> open gripper -> move safe_pose (分段)
 
 `WAIT_PRE_TARGET` 是等待第一个视觉目标的阶段，机械臂尚未开始运动。**没有目标时不会触发 RECOVER**，只会周期性 warning（默认 15 s），清空旧目标窗口，并持续等待 `/visual_target_base`。
 
-`WAIT_GRASP_TARGET`（到达 pre-grasp 后的二次确认）目标丢失**会**进入 RECOVER，因为机械臂已离开安全位姿。
+默认流程不再强制进入 `WAIT_GRASP_TARGET`。启用 `require_second_visual_confirm` 后，`WAIT_GRASP_TARGET`（到达 pre-grasp 后的二次确认）目标丢失**会**进入 RECOVER，因为机械臂已离开安全位姿。
 
 ## REJECTED_BUSY
 
