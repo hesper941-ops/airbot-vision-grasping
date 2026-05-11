@@ -22,7 +22,11 @@ grasp_task_open_loop:
     base_frame: base_link
     allow_empty_target_frame: false
 
-    approach_mode: "top_down"
+    approach_mode: "front"
+    approach_priority: ["front", "top_down"]
+    front_first_then_top_down: true
+    max_approach_mode_retries: 1
+    continue_with_last_seen_during_motion: true
     table_z: 0.0
     table_clearance: 0.04
     final_grasp_clearance: 0.015
@@ -50,12 +54,17 @@ grasp_task_open_loop:
     end_pose_timeout_sec: 1.0
     use_last_seen_target_on_loss: true
     visual_lost_grace_sec: 0.5
-    last_seen_target_max_age_sec: 5.0
+    last_seen_target_max_age_sec: 8.0
     update_target_during_motion: true
     freeze_target_before_close: true
     require_second_visual_confirm: false
     max_target_jump_m: 0.08
     max_target_z_jump_m: 0.08
+    j6_home_deg: 90.0
+    j6_allowed_delta_deg: 90.0
+    j6_preferred_offsets_deg: [0.0, 90.0, -90.0]
+    forbid_camera_upside_down: true
+    return_j6_to_home_on_recover: true
 
     workspace_limits:
       x_min: 0.10

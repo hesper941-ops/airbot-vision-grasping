@@ -45,6 +45,12 @@ class GraspTaskOpenLoop(Node):
         self.active_motion_goal: Optional[list] = None
         self.target_window = deque(maxlen=self._stable_frame_count_required())
         self.last_visual_lost_warning_time: Optional[float] = None
+        self.last_target_failure_reason = None
+        self.current_approach_index = 0
+        self.current_approach_mode = None
+        self.approach_failed_modes = set()
+        self.approach_retry_count = 0
+        self.return_j6_home_sent = False
 
         self.state_command_sent = False
         self.stage_motion_started = False
@@ -115,7 +121,11 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('grasp_z_offset', 0.0)
         self.declare_parameter('lift_z_offset', 0.10)
         self.declare_parameter('safe_pose', [0.35, 0.0, 0.35])
-        self.declare_parameter('approach_mode', 'top_down')
+        self.declare_parameter('approach_mode', 'front')
+        self.declare_parameter('approach_priority', ['front', 'top_down'])
+        self.declare_parameter('front_first_then_top_down', True)
+        self.declare_parameter('max_approach_mode_retries', 1)
+        self.declare_parameter('continue_with_last_seen_during_motion', True)
         self.declare_parameter('table_z', 0.0)
         self.declare_parameter('table_clearance', 0.04)
         self.declare_parameter('final_grasp_clearance', 0.015)
@@ -128,6 +138,11 @@ class GraspTaskOpenLoop(Node):
         # Confirm exact hardware model before widening this range.
         self.declare_parameter('joint6_min_rad', -2.9671)
         self.declare_parameter('joint6_max_rad', 2.9671)
+        self.declare_parameter('j6_home_deg', 90.0)
+        self.declare_parameter('j6_allowed_delta_deg', 90.0)
+        self.declare_parameter('j6_preferred_offsets_deg', [0.0, 90.0, -90.0])
+        self.declare_parameter('forbid_camera_upside_down', True)
+        self.declare_parameter('return_j6_to_home_on_recover', True)
 
         self.declare_parameter('confidence_threshold', 0.7)
         self.declare_parameter('stable_frame_count', 5)
@@ -180,6 +195,7 @@ class GraspTaskOpenLoop(Node):
             'lift_z_offset': self.get_parameter('lift_z_offset').value,
             'safe_pose': self.get_parameter('safe_pose').value,
             'approach_mode': self.get_parameter('approach_mode').value,
+            'approach_priority': self.get_parameter('approach_priority').value,
             'table_z': self.get_parameter('table_z').value,
             'table_clearance': self.get_parameter('table_clearance').value,
             'final_grasp_clearance': self.get_parameter('final_grasp_clearance').value,
@@ -190,6 +206,10 @@ class GraspTaskOpenLoop(Node):
             'joint6_compensation_deg': self.get_parameter('joint6_compensation_deg').value,
             'joint6_min_rad': self.get_parameter('joint6_min_rad').value,
             'joint6_max_rad': self.get_parameter('joint6_max_rad').value,
+            'j6_home_deg': self.get_parameter('j6_home_deg').value,
+            'j6_allowed_delta_deg': self.get_parameter('j6_allowed_delta_deg').value,
+            'j6_preferred_offsets_deg': self.get_parameter('j6_preferred_offsets_deg').value,
+            'forbid_camera_upside_down': self.get_parameter('forbid_camera_upside_down').value,
             'workspace_limits': {
                 'x_min': self.get_parameter('workspace_limits.x_min').value,
                 'x_max': self.get_parameter('workspace_limits.x_max').value,
@@ -286,8 +306,9 @@ class GraspTaskOpenLoop(Node):
             threshold = int(self.get_parameter('rejected_busy_recover_threshold').value)
             if self.rejected_busy_count >= threshold:
                 self.get_logger().error(
-                    f'REJECTED_BUSY {self.rejected_busy_count} times (>= {threshold}); entering RECOVER.')
-                self._enter_recover()
+                    f'REJECTED_BUSY {self.rejected_busy_count} times (>= {threshold}); handling approach failure.')
+                self._handle_approach_failure(
+                    f'REJECTED_BUSY {self.rejected_busy_count} times')
             else:
                 self.get_logger().warning(
                     f'REJECTED_BUSY {self.rejected_busy_count}/{threshold}; '
@@ -296,8 +317,8 @@ class GraspTaskOpenLoop(Node):
 
         if self.executor_status in ('ERROR', 'TIMEOUT'):
             self.get_logger().error(
-                f'Executor status {self.executor_status}; entering RECOVER.')
-            self._enter_recover()
+                f'Executor status {self.executor_status}; handling approach failure.')
+            self._handle_approach_failure(f'Executor status {self.executor_status}')
 
     def step_loop(self):
         try:
@@ -359,9 +380,40 @@ class GraspTaskOpenLoop(Node):
             self.pre_target = self._get_stable_target()
             if not self.target_frozen:
                 self.active_target_base = list(self.pre_target)
+            self._start_approach_sequence()
             self.get_logger().info(
                 f'Pre target stable: {self._fmt_xyz(self.pre_target)}')
             self._transition('SET_GRIPPER_ORIENTATION')
+
+    def _start_approach_sequence(self):
+        priority = self._approach_priority()
+        self.current_approach_index = 0
+        self.current_approach_mode = priority[0]
+        self.approach_failed_modes.clear()
+        self.approach_retry_count = 0
+        self.planner.set_approach_mode(self.current_approach_mode)
+        self.get_logger().info(
+            f'Start approach sequence: current_approach_mode={self.current_approach_mode}, '
+            f'approach_priority={priority}.')
+
+    def _approach_priority(self):
+        raw = list(self.get_parameter('approach_priority').value)
+        priority = [str(item).strip().lower() for item in raw if str(item).strip()]
+        if not priority:
+            priority = [str(self.get_parameter('approach_mode').value).strip().lower()]
+        clean = []
+        for mode in priority:
+            if mode in ('front', 'top_down') and mode not in clean:
+                clean.append(mode)
+        if not clean:
+            clean = ['front', 'top_down']
+        return clean
+
+    def _ensure_approach_mode_started(self):
+        if self.current_approach_mode is None:
+            self._start_approach_sequence()
+        else:
+            self.planner.set_approach_mode(self.current_approach_mode)
 
     def _handle_set_gripper_orientation(self):
         if self._state_elapsed() > self._param_float('set_orientation_timeout_sec'):
@@ -379,9 +431,11 @@ class GraspTaskOpenLoop(Node):
             if not self._executor_accepting():
                 return
             joint_target = self.planner.compute_joint6_target(self.last_joint_pos)
+            for line in self.planner.last_j6_debug:
+                self.get_logger().info(line)
             if joint_target is None:
-                self.get_logger().error('Cannot compute joint6 target.')
-                self._enter_recover()
+                self.get_logger().error('Cannot compute safe joint6 target; entering RECOVER.')
+                self._enter_recover('Cannot compute safe joint6 target')
                 return
             self._publish_joint_target(joint_target)
             self.state_command_sent = True
@@ -419,7 +473,7 @@ class GraspTaskOpenLoop(Node):
     def _handle_wait_grasp_target(self):
         if self._state_elapsed() > self._param_float('wait_grasp_target_timeout_sec'):
             self.get_logger().error('WAIT_GRASP_TARGET timeout.')
-            self._enter_recover()
+            self._handle_approach_failure('WAIT_GRASP_TARGET timeout')
             return
 
         if self._is_target_stable():
@@ -430,7 +484,8 @@ class GraspTaskOpenLoop(Node):
                 if drift > max_drift:
                     self.get_logger().error(
                         f'Grasp target drift too large after pre-grasp: {drift:.4f}m > {max_drift:.4f}m.')
-                    self._enter_recover()
+                    self._handle_approach_failure(
+                        f'Grasp target drift too large after pre-grasp: {drift:.4f}m > {max_drift:.4f}m')
                     return
             self.grasp_target = stable
             if not self.target_frozen:
@@ -470,6 +525,7 @@ class GraspTaskOpenLoop(Node):
         self._transition('CLOSE_GRIPPER')
 
     def _compute_pre_grasp_from_active_target(self):
+        self._ensure_approach_mode_started()
         target = self._get_active_target_or_last_seen()
         if target is None:
             return None
@@ -500,6 +556,7 @@ class GraspTaskOpenLoop(Node):
             return None
 
     def _compute_grasp_from_active_target(self):
+        self._ensure_approach_mode_started()
         target = self._get_active_target_or_last_seen()
         if target is None:
             return None
@@ -516,6 +573,14 @@ class GraspTaskOpenLoop(Node):
                         [grasp[0], grasp[1], 0.0],
                     )
                     if xy_delta > max(self._position_tolerance(), 0.03):
+                        if self.approach_retry_count < self._param_int('max_approach_mode_retries'):
+                            self.approach_retry_count += 1
+                            self.get_logger().warning(
+                                f'top_down XY not aligned (xy_delta={xy_delta:.3f}m); '
+                                f'retry MOVE_PRE_GRASP {self.approach_retry_count}/'
+                                f'{self._param_int("max_approach_mode_retries")}.')
+                            self._transition('MOVE_PRE_GRASP')
+                            return None
                         raise ValueError(
                             f'top_down grasp requires near-vertical descent; xy_delta={xy_delta:.3f}m.')
                     if float(grasp[2]) > float(self.last_end_pose[2]) + self._position_tolerance():
@@ -530,8 +595,12 @@ class GraspTaskOpenLoop(Node):
     def _log_waypoint_safety(self, state_name: str, target: list, pre_grasp=None, grasp=None):
         parts = [
             f'{state_name} safety:',
+            f'current_approach_mode={self.current_approach_mode}',
             f'approach_mode={self.planner.approach_mode}',
             f'target_base={self._fmt_xyz(target)}',
+            f'active_target_base={self._fmt_xyz(self.active_target_base) if self.active_target_base else None}',
+            f'last_seen_target_base={self._fmt_xyz(self.last_seen_target_base) if self.last_seen_target_base else None}',
+            f'last_seen_age={self._last_seen_age_sec():.2f}s' if self._last_seen_age_sec() is not None else 'last_seen_age=None',
             f'table_z={self.planner.table_z:.3f}',
             f'min_safe_motion_z={self.planner.min_safe_motion_z:.3f}',
         ]
@@ -545,33 +614,54 @@ class GraspTaskOpenLoop(Node):
         now = self._now_sec()
         max_age = self._param_float('last_seen_target_max_age_sec')
         grace_sec = self._param_float('visual_lost_grace_sec')
+        self.last_target_failure_reason = None
 
         if self.last_seen_target_base is None or self.last_seen_target_time is None:
             self.get_logger().error('No last-seen /visual_target_base available.')
+            self.last_target_failure_reason = 'last_seen_target_base missing'
             return None
 
         age = now - self.last_seen_target_time
         if age > max_age:
             self.get_logger().error(
                 f'Last-seen base target is too old: age={age:.2f}s > {max_age:.2f}s.')
+            self.last_target_failure_reason = (
+                f'last_seen_target_base age {age:.2f}s exceeds max {max_age:.2f}s')
             return None
 
         use_last_seen = bool(self.get_parameter('use_last_seen_target_on_loss').value)
+        if self.task_state in ('MOVE_PRE_GRASP', 'MOVE_GRASP', 'MOVE_LIFT'):
+            use_last_seen = (
+                use_last_seen
+                and bool(self.get_parameter('continue_with_last_seen_during_motion').value)
+            )
         if self.active_target_base is not None and not self.target_frozen:
             if age <= grace_sec:
+                self.get_logger().debug(
+                    f'Using active_target_base={self._fmt_xyz(self.active_target_base)}, '
+                    f'last_seen_age={age:.2f}s.')
                 return list(self.active_target_base)
             if not use_last_seen:
                 self.get_logger().error('Visual target lost and last-seen fallback is disabled.')
+                self.last_target_failure_reason = 'last-seen fallback disabled'
                 return None
             self._warn_visual_lost(age)
+            self.get_logger().warning(
+                f'No fresh visual target for {age:.2f}s; continue motion with '
+                f'last_seen_target_base={self._fmt_xyz(self.last_seen_target_base)} '
+                f'because age <= {max_age:.2f}s.')
             return list(self.active_target_base)
 
         if not use_last_seen:
             self.get_logger().error('Visual target lost and last-seen fallback is disabled.')
+            self.last_target_failure_reason = 'last-seen fallback disabled'
             return None
 
         if age > grace_sec:
             self._warn_visual_lost(age)
+            self.get_logger().warning(
+                f'Using last_seen_target_base={self._fmt_xyz(self.last_seen_target_base)}, '
+                f'last_seen_age={age:.2f}s; target is temporarily lost but within max age.')
         return list(self.last_seen_target_base)
 
     def _warn_visual_lost(self, age: float):
@@ -678,13 +768,49 @@ class GraspTaskOpenLoop(Node):
             self._handle_cartesian_motion(
                 'RECOVER_RETREAT',
                 lambda: self._compute_safe_retreat_goal(),
-                on_done=self._finish_recover,
+                on_done=self._after_recover_retreat,
                 timeout_param='recover_timeout_sec',
             )
+
+        if self.recover_phase == 'RETURN_J6_HOME':
+            self._handle_recover_return_j6_home()
 
     def _advance_recover_to_retreat(self):
         self.recover_phase = 'RETREAT'
         self._reset_stage_vars()
+
+    def _after_recover_retreat(self):
+        if bool(self.get_parameter('return_j6_to_home_on_recover').value):
+            self.recover_phase = 'RETURN_J6_HOME'
+            self._reset_stage_vars()
+            self.get_logger().info('RECOVER: safe retreat reached; returning J6 to home.')
+            return
+        self._finish_recover()
+
+    def _handle_recover_return_j6_home(self):
+        if self.last_joint_pos is None:
+            self._finish_recover()
+            return
+        if not self.state_command_sent:
+            if not self._executor_accepting():
+                return
+            joint_target = self.planner.compute_j6_home_target(self.last_joint_pos)
+            if joint_target is None:
+                self.get_logger().warning(
+                    'RECOVER: cannot compute legal J6 home target; finish recovery anyway.')
+                self._finish_recover()
+                return
+            self._publish_joint_target(joint_target)
+            self.state_command_sent = True
+            self.get_logger().info(
+                f'RECOVER: sent J6 home command target={math.degrees(joint_target[5]):.1f} deg.')
+            return
+        if self.last_joint_vel is None:
+            return
+        max_speed = max(abs(float(v)) for v in self.last_joint_vel)
+        if max_speed > self._param_float('joint_speed_safe_threshold'):
+            return
+        self._finish_recover()
 
     def _compute_safe_retreat_goal(self):
         if self.last_end_pose is not None and float(self.last_end_pose[2]) < self.planner.safe_motion_z:
@@ -706,7 +832,7 @@ class GraspTaskOpenLoop(Node):
         """
         if self._state_elapsed() > self._param_float(timeout_param):
             self.get_logger().error(f'{state_name} timeout.')
-            self._enter_recover()
+            self._handle_approach_failure(f'{state_name} timeout')
             return
 
         if self.pending_speed_profile is not None:
@@ -721,11 +847,16 @@ class GraspTaskOpenLoop(Node):
             full_goal = goal_fn()
         except Exception as exc:
             self.get_logger().error(f'{state_name}: failed to compute motion goal: {exc}')
-            self._enter_recover()
+            self._handle_approach_failure(f'{state_name} goal exception: {exc}')
+            return
+        if self.task_state != state_name and state_name in ('MOVE_PRE_GRASP', 'MOVE_GRASP'):
             return
         if full_goal is None or len(full_goal) != 3:
             self.get_logger().error(f'{state_name}: invalid motion goal.')
-            self._enter_recover()
+            if self.last_target_failure_reason is not None:
+                self._enter_recover(self.last_target_failure_reason)
+                return
+            self._handle_approach_failure(f'{state_name} invalid motion goal')
             return
         full_goal = [float(full_goal[0]), float(full_goal[1]), float(full_goal[2])]
 
@@ -757,20 +888,25 @@ class GraspTaskOpenLoop(Node):
             step_goal = self.planner.limit_step(
                 self.last_end_pose, full_goal, max_step)
             is_final_step = self._distance(step_goal, full_goal) <= tolerance
-            if state_name == 'MOVE_GRASP' and not is_final_step:
-                step_goal = self.planner.validate_waypoint(
-                    [
-                        step_goal[0],
-                        step_goal[1],
-                        max(float(step_goal[2]), self.planner.safe_motion_z),
-                    ],
-                    is_final_grasp=False,
-                )
-            else:
-                step_goal = self.planner.validate_waypoint(
-                    step_goal,
-                    is_final_grasp=(state_name == 'MOVE_GRASP' and is_final_step),
-                )
+            try:
+                if state_name == 'MOVE_GRASP' and not is_final_step:
+                    step_goal = self.planner.validate_waypoint(
+                        [
+                            step_goal[0],
+                            step_goal[1],
+                            max(float(step_goal[2]), self.planner.safe_motion_z),
+                        ],
+                        is_final_grasp=False,
+                    )
+                else:
+                    step_goal = self.planner.validate_waypoint(
+                        step_goal,
+                        is_final_grasp=(state_name == 'MOVE_GRASP' and is_final_step),
+                    )
+            except Exception as exc:
+                self.get_logger().error(f'{state_name}: unsafe step_goal: {exc}')
+                self._handle_approach_failure(f'{state_name} unsafe step_goal: {exc}')
+                return
             self.active_motion_goal = [
                 float(step_goal[0]),
                 float(step_goal[1]),
@@ -791,7 +927,7 @@ class GraspTaskOpenLoop(Node):
         # ---- Step command sent; wait for step_goal ----
         if self.active_motion_goal is None:
             self.get_logger().error(f'{state_name}: active_motion_goal is missing.')
-            self._enter_recover()
+            self._handle_approach_failure(f'{state_name} active_motion_goal missing')
             return
 
         distance_to_step = self._distance(self.last_end_pose, self.active_motion_goal)
@@ -886,9 +1022,48 @@ class GraspTaskOpenLoop(Node):
             statistics.median(entry['z'] for entry in self.target_window),
         ]
 
-    def _enter_recover(self):
+    def _handle_approach_failure(self, reason: str):
+        approach_states = ('MOVE_PRE_GRASP', 'MOVE_GRASP', 'WAIT_GRASP_TARGET')
+        if self.task_state not in approach_states:
+            self._enter_recover(reason)
+            return
+
+        current = self.current_approach_mode or self.planner.approach_mode
+        self.approach_failed_modes.add(current)
+        priority = self._approach_priority()
+
+        if (
+            bool(self.get_parameter('front_first_then_top_down').value)
+            and current == 'front'
+            and 'top_down' in priority
+            and 'top_down' not in self.approach_failed_modes
+        ):
+            self.current_approach_mode = 'top_down'
+            self.current_approach_index = priority.index('top_down')
+            self.approach_retry_count = 0
+            self.planner.set_approach_mode('top_down')
+            self.target_frozen = False
+            self.active_motion_goal = None
+            self._reset_stage_vars()
+            if self.executor_status == 'ERROR':
+                self._publish_reset_executor('clear_error')
+                self.last_reset_executor_time = self._now_sec()
+            self.get_logger().warning(
+                f'Front approach failed; fallback to top_down approach. reason={reason}. '
+                f'last_seen_target_base={self._fmt_xyz(self.last_seen_target_base) if self.last_seen_target_base else None}.')
+            self._transition('MOVE_PRE_GRASP')
+            return
+
+        self.get_logger().error(
+            f'Approach failed with no remaining fallback: mode={current}, '
+            f'failed_modes={sorted(self.approach_failed_modes)}, reason={reason}.')
+        self._enter_recover(reason)
+
+    def _enter_recover(self, reason: str = ''):
         if self.task_state == 'RECOVER':
             return
+        if reason:
+            self.get_logger().error(f'Entering RECOVER: {reason}')
         self.pre_target = None
         self.grasp_target = None
         self.active_target_base = None
@@ -902,7 +1077,8 @@ class GraspTaskOpenLoop(Node):
         self._transition('RECOVER')
 
     def _finish_recover(self):
-        self.get_logger().info('RECOVER complete; reset cycle and return to IDLE.')
+        self.get_logger().info(
+            'RECOVER complete; clearing approach state and returning to IDLE.')
         self._reset_cycle()
         self._transition('IDLE')
 
@@ -929,6 +1105,12 @@ class GraspTaskOpenLoop(Node):
         self.last_reset_executor_time = None
         self.rejected_busy_count = 0
         self.last_visual_lost_warning_time = None
+        self.last_target_failure_reason = None
+        self.current_approach_index = 0
+        self.current_approach_mode = None
+        self.approach_failed_modes.clear()
+        self.approach_retry_count = 0
+        self.return_j6_home_sent = False
         self._reset_stage_vars()
 
     def _reset_stage_vars(self):
@@ -946,7 +1128,9 @@ class GraspTaskOpenLoop(Node):
             self.target_window.clear()
         if old_state != new_state:
             self.rejected_busy_count = 0
-            self.get_logger().info(f'State transition: {old_state} -> {new_state}')
+            self.get_logger().info(
+                f'State transition: {old_state} -> {new_state}, '
+                f'current_approach_mode={self.current_approach_mode}')
 
     def _set_speed_profile(self, profile: str):
         profile = profile.lower()
@@ -1021,6 +1205,11 @@ class GraspTaskOpenLoop(Node):
 
     def _now_sec(self) -> float:
         return self.get_clock().now().nanoseconds / 1e9
+
+    def _last_seen_age_sec(self):
+        if self.last_seen_target_time is None:
+            return None
+        return self._now_sec() - self.last_seen_target_time
 
     def _position_tolerance(self) -> float:
         return self._param_float('position_tolerance_m')

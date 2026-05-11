@@ -17,7 +17,7 @@ class GraspPlanner:
         self.grasp_z_offset = config.get('grasp_z_offset', 0.0)
         self.lift_z_offset = config.get('lift_z_offset', 0.10)
         self.safe_pose = config.get('safe_pose', [0.35, 0.00, 0.35])
-        self.approach_mode = str(config.get('approach_mode', 'top_down')).strip().lower()
+        self.approach_mode = str(config.get('approach_mode', 'front')).strip().lower()
         self.table_z = float(config.get('table_z', 0.0))
         self.table_clearance = float(config.get('table_clearance', 0.04))
         self.final_grasp_clearance = float(config.get('final_grasp_clearance', 0.015))
@@ -26,6 +26,12 @@ class GraspPlanner:
         self.min_safe_motion_z = float(config.get('min_safe_motion_z', 0.08))
         self.reject_target_below_table = bool(config.get('reject_target_below_table', True))
         self.joint6_compensation_deg = config.get('joint6_compensation_deg', 90.0)
+        self.j6_home_deg = float(config.get('j6_home_deg', 90.0))
+        self.j6_allowed_delta_deg = float(config.get('j6_allowed_delta_deg', 90.0))
+        self.j6_preferred_offsets_deg = list(config.get(
+            'j6_preferred_offsets_deg', [0.0, 90.0, -90.0]))
+        self.forbid_camera_upside_down = bool(config.get('forbid_camera_upside_down', True))
+        self.last_j6_debug = []
         # Conservative J6 range based on AIRBOT Play official specs.
         # Confirm exact hardware model before widening these defaults.
         self.joint6_min_rad = float(config.get('joint6_min_rad', -2.9671))
@@ -38,6 +44,12 @@ class GraspPlanner:
         self.y_max = limits.get('y_max', 0.50)
         self.z_min = limits.get('z_min', 0.02)
         self.z_max = limits.get('z_max', 0.70)
+
+    def set_approach_mode(self, mode: str):
+        mode = str(mode).strip().lower()
+        if mode not in ('front', 'top_down'):
+            raise ValueError(f"Unsupported approach_mode={mode!r}; expected front or top_down.")
+        self.approach_mode = mode
 
     def compute_pre_grasp(self, target_xyz: list) -> list:
         """Return the pre-grasp point above the target."""
@@ -77,10 +89,11 @@ class GraspPlanner:
     def compute_safe_grasp(self, target_xyz: list) -> list:
         """Return a final grasp waypoint that never goes below table clearance."""
         target = self._validate_target(target_xyz)
+        min_grasp_z = self.safe_motion_z if self.approach_mode == 'front' else self.final_grasp_z
         waypoint = [
             target[0],
             target[1],
-            max(target[2] + self.grasp_z_offset, self.final_grasp_z),
+            max(target[2] + self.grasp_z_offset, min_grasp_z),
         ]
         return self.validate_waypoint(waypoint, is_final_grasp=True)
 
@@ -95,13 +108,11 @@ class GraspPlanner:
 
     def validate_waypoint(self, xyz: list, is_final_grasp: bool = False) -> list:
         """Validate and clamp a waypoint while enforcing table clearance."""
-        point = self._clamp(self._validate_xyz(xyz, name='waypoint'))
+        point = self._validate_xyz(xyz, name='waypoint')
         min_z = self.final_grasp_z if is_final_grasp else self.safe_motion_z
         if point[2] < min_z:
             point[2] = min_z
-        if point[2] < self.z_min or point[2] > self.z_max:
-            raise ValueError(
-                f"Waypoint z={point[2]:.3f} is outside workspace [{self.z_min:.3f}, {self.z_max:.3f}].")
+        self._validate_workspace(point)
         return point
 
     def validate_approach_direction(self, current_xyz: list, target_xyz: list, mode=None):
@@ -171,30 +182,79 @@ class GraspPlanner:
         return math.radians(self.joint6_compensation_deg)
 
     def compute_joint6_target(self, current_joint_pos: list) -> Optional[list]:
-        """Choose a safe joint6 compensation direction.
-
-        Both +offset and -offset candidates are checked against joint6 limits. If
-        both are valid, choose the one farther from the nearest limit. If neither
-        is valid, return None so the task can enter recovery.
-        """
+        """Choose a safe J6 target without allowing camera-upside-down poses."""
+        self.last_j6_debug = []
         if len(current_joint_pos) < 6:
+            self.last_j6_debug.append('Reject J6: current_joint_pos has fewer than 6 values.')
             return None
 
         current_j6 = float(current_joint_pos[5])
-        offset = self.joint6_compensation_rad
-        candidates = [current_j6 + offset, current_j6 - offset]
-        valid = [
-            value for value in candidates
-            if self.joint6_min_rad <= value <= self.joint6_max_rad
-        ]
+        home = self.j6_home_rad
+        allowed_low, allowed_high = self.j6_allowed_range_rad
+        if self.forbid_camera_upside_down and not allowed_low <= current_j6 <= allowed_high:
+            self.last_j6_debug.append(
+                f'Current J6 {math.degrees(current_j6):.1f} deg is outside safe range '
+                f'[{math.degrees(allowed_low):.1f}, {math.degrees(allowed_high):.1f}] deg; '
+                f'prefer returning to home {self.j6_home_deg:.1f} deg.')
+
+        candidates = []
+        for offset_deg in self.j6_preferred_offsets_deg:
+            candidate = home + math.radians(float(offset_deg))
+            candidates.append((offset_deg, candidate))
+
+        valid = []
+        for offset_deg, value in candidates:
+            if not self.joint6_min_rad <= value <= self.joint6_max_rad:
+                self.last_j6_debug.append(
+                    f'Reject J6 candidate home{offset_deg:+.1f} deg -> {math.degrees(value):.1f} deg: '
+                    f'outside hardware range [{math.degrees(self.joint6_min_rad):.1f}, '
+                    f'{math.degrees(self.joint6_max_rad):.1f}] deg.')
+                continue
+            if self.forbid_camera_upside_down and not allowed_low <= value <= allowed_high:
+                self.last_j6_debug.append(
+                    f'Reject J6 candidate home{offset_deg:+.1f} deg -> {math.degrees(value):.1f} deg: '
+                    f'outside safe camera range [{math.degrees(allowed_low):.1f}, '
+                    f'{math.degrees(allowed_high):.1f}] deg.')
+                continue
+            valid.append(value)
 
         if not valid:
+            self.last_j6_debug.append('Reject J6: no valid home/+-90 candidate remains.')
             return None
 
-        selected = max(valid, key=self._joint6_limit_margin)
+        if self.forbid_camera_upside_down and not allowed_low <= current_j6 <= allowed_high and home in valid:
+            selected = home
+        else:
+            selected = min(valid, key=lambda value: abs(value - current_j6))
+        self.last_j6_debug.append(
+            f'J6 selection: current={math.degrees(current_j6):.1f} deg, '
+            f'selected={math.degrees(selected):.1f} deg, home={self.j6_home_deg:.1f} deg, '
+            f'allowed=[{math.degrees(allowed_low):.1f}, {math.degrees(allowed_high):.1f}] deg.')
         target = list(current_joint_pos[:])
         target[5] = selected
         return target
+
+    def compute_j6_home_target(self, current_joint_pos: list) -> Optional[list]:
+        if len(current_joint_pos) < 6:
+            return None
+        home = self.j6_home_rad
+        if not self.joint6_min_rad <= home <= self.joint6_max_rad:
+            return None
+        allowed_low, allowed_high = self.j6_allowed_range_rad
+        if self.forbid_camera_upside_down and not allowed_low <= home <= allowed_high:
+            return None
+        target = list(current_joint_pos[:])
+        target[5] = home
+        return target
+
+    @property
+    def j6_home_rad(self) -> float:
+        return math.radians(self.j6_home_deg)
+
+    @property
+    def j6_allowed_range_rad(self):
+        delta = math.radians(self.j6_allowed_delta_deg)
+        return self.j6_home_rad - delta, self.j6_home_rad + delta
 
     def _joint6_limit_margin(self, value: float) -> float:
         """Return distance from the closest joint6 limit."""
@@ -207,6 +267,15 @@ class GraspPlanner:
             min(max(float(xyz[1]), self.y_min), self.y_max),
             min(max(float(xyz[2]), self.z_min), self.z_max),
         ]
+
+    def _validate_workspace(self, xyz: list):
+        for index, value in enumerate(xyz):
+            low = [self.x_min, self.y_min, self.z_min][index]
+            high = [self.x_max, self.y_max, self.z_max][index]
+            if not low <= float(value) <= high:
+                axis = 'xyz'[index]
+                raise ValueError(
+                    f"Waypoint {axis}={value:.3f} is outside workspace [{low:.3f}, {high:.3f}].")
 
     def _validate_target(self, target_xyz: list) -> list:
         target = self._validate_xyz(target_xyz, name='target_xyz')
