@@ -67,6 +67,10 @@ grasp_task_open_loop:
     j6_preferred_offsets_deg: [90.0, -90.0]
     forbid_camera_upside_down: true
     return_j6_to_home_on_recover: true
+    return_to_init_after_grasp: true
+    keep_gripper_closed_after_grasp: true
+    final_init_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 90.0]
+    return_init_timeout_sec: 10.0
 
     workspace_limits:
       x_min: 0.10

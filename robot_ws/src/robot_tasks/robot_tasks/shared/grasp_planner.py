@@ -182,7 +182,12 @@ class GraspPlanner:
         return math.radians(self.joint6_compensation_deg)
 
     def compute_joint6_target(self, current_joint_pos: list) -> Optional[list]:
-        """Choose a safe J6 target without allowing camera-upside-down poses."""
+        """Choose a safe J6 target from preferred offsets (±90°), excluding 0°.
+
+        Candidates are j6_home + offset for each offset in j6_preferred_offsets_deg.
+        Offsets of 0° are excluded — the gripper must rotate ±90° for grasping.
+        Candidates are tested in priority order; the first valid one wins.
+        """
         self.last_j6_debug = []
         if len(current_joint_pos) < 6:
             self.last_j6_debug.append('Reject J6: current_joint_pos has fewer than 6 values.')
@@ -191,48 +196,43 @@ class GraspPlanner:
         current_j6 = float(current_joint_pos[5])
         home = self.j6_home_rad
         allowed_low, allowed_high = self.j6_allowed_range_rad
-        if self.forbid_camera_upside_down and not allowed_low <= current_j6 <= allowed_high:
-            self.last_j6_debug.append(
-                f'Current J6 {math.degrees(current_j6):.1f} deg is outside safe range '
-                f'[{math.degrees(allowed_low):.1f}, {math.degrees(allowed_high):.1f}] deg; '
-                f'prefer returning to home {self.j6_home_deg:.1f} deg.')
+        hw_low = math.degrees(self.joint6_min_rad)
+        hw_high = math.degrees(self.joint6_max_rad)
 
-        candidates = []
         for offset_deg in self.j6_preferred_offsets_deg:
-            candidate = home + math.radians(float(offset_deg))
-            candidates.append((offset_deg, candidate))
+            offset_deg = float(offset_deg)
+            if abs(offset_deg) < 0.01:
+                self.last_j6_debug.append(
+                    f'Skip J6 candidate home{offset_deg:+.1f}°: 0° offset not allowed for grasping.')
+                continue
 
-        valid = []
-        for offset_deg, value in candidates:
+            value = home + math.radians(offset_deg)
+            deg = math.degrees(value)
+
             if not self.joint6_min_rad <= value <= self.joint6_max_rad:
                 self.last_j6_debug.append(
-                    f'Reject J6 candidate home{offset_deg:+.1f} deg -> {math.degrees(value):.1f} deg: '
-                    f'outside hardware range [{math.degrees(self.joint6_min_rad):.1f}, '
-                    f'{math.degrees(self.joint6_max_rad):.1f}] deg.')
+                    f'Reject J6 candidate home{offset_deg:+.1f}° -> {deg:.1f}°: '
+                    f'exceeds hardware limit [{hw_low:.1f}°, {hw_high:.1f}°].')
                 continue
+
             if self.forbid_camera_upside_down and not allowed_low <= value <= allowed_high:
                 self.last_j6_debug.append(
-                    f'Reject J6 candidate home{offset_deg:+.1f} deg -> {math.degrees(value):.1f} deg: '
-                    f'outside safe camera range [{math.degrees(allowed_low):.1f}, '
-                    f'{math.degrees(allowed_high):.1f}] deg.')
+                    f'Reject J6 candidate home{offset_deg:+.1f}° -> {deg:.1f}°: '
+                    f'outside safe camera range [{math.degrees(allowed_low):.1f}°, '
+                    f'{math.degrees(allowed_high):.1f}°].')
                 continue
-            valid.append(value)
 
-        if not valid:
-            self.last_j6_debug.append('Reject J6: no valid home/+-90 candidate remains.')
-            return None
+            self.last_j6_debug.append(
+                f'J6 selection: current={math.degrees(current_j6):.1f} deg, '
+                f'selected={deg:.1f} deg, home={self.j6_home_deg:.1f} deg, '
+                f'allowed=[{math.degrees(allowed_low):.1f}, {math.degrees(allowed_high):.1f}] deg, '
+                f'reason=home{offset_deg:+.1f}°')
+            target = list(current_joint_pos[:])
+            target[5] = value
+            return target
 
-        if self.forbid_camera_upside_down and not allowed_low <= current_j6 <= allowed_high and home in valid:
-            selected = home
-        else:
-            selected = min(valid, key=lambda value: abs(value - current_j6))
-        self.last_j6_debug.append(
-            f'J6 selection: current={math.degrees(current_j6):.1f} deg, '
-            f'selected={math.degrees(selected):.1f} deg, home={self.j6_home_deg:.1f} deg, '
-            f'allowed=[{math.degrees(allowed_low):.1f}, {math.degrees(allowed_high):.1f}] deg.')
-        target = list(current_joint_pos[:])
-        target[5] = selected
-        return target
+        self.last_j6_debug.append('Reject J6: no valid candidate remains after trying all preferred offsets.')
+        return None
 
     def compute_j6_home_target(self, current_joint_pos: list) -> Optional[list]:
         if len(current_joint_pos) < 6:

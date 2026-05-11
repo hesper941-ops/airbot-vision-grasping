@@ -140,9 +140,13 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('joint6_max_rad', 2.9671)
         self.declare_parameter('j6_home_deg', 90.0)
         self.declare_parameter('j6_allowed_delta_deg', 90.0)
-        self.declare_parameter('j6_preferred_offsets_deg', [0.0, 90.0, -90.0])
+        self.declare_parameter('j6_preferred_offsets_deg', [90.0, -90.0])
         self.declare_parameter('forbid_camera_upside_down', True)
         self.declare_parameter('return_j6_to_home_on_recover', True)
+        self.declare_parameter('return_to_init_after_grasp', True)
+        self.declare_parameter('keep_gripper_closed_after_grasp', True)
+        self.declare_parameter('final_init_joint_pos_deg', [0.0, -45.0, 110.0, -90.0, 90.0, 90.0])
+        self.declare_parameter('return_init_timeout_sec', 10.0)
 
         self.declare_parameter('confidence_threshold', 0.7)
         self.declare_parameter('stable_frame_count', 5)
@@ -351,6 +355,9 @@ class GraspTaskOpenLoop(Node):
 
             elif self.task_state == 'MOVE_RETREAT':
                 self._handle_move_retreat()
+
+            elif self.task_state == 'RETURN_INIT_POSE':
+                self._handle_return_init_pose()
 
             elif self.task_state == 'RECOVER':
                 self._handle_recover()
@@ -727,8 +734,58 @@ class GraspTaskOpenLoop(Node):
         self._handle_cartesian_motion(
             'MOVE_LIFT',
             lambda: self.planner.compute_safe_lift(self.last_end_pose),
-            on_done=lambda: self._transition('MOVE_RETREAT'),
+            on_done=self._after_move_lift,
         )
+
+    def _after_move_lift(self):
+        if bool(self.get_parameter('return_to_init_after_grasp').value):
+            self.get_logger().info(
+                'Grasp succeeded; keeping gripper closed. '
+                'Returning to init joint pose after grasp: '
+                f'{list(self.get_parameter("final_init_joint_pos_deg").value)}')
+            self._transition('RETURN_INIT_POSE')
+        else:
+            self._transition('MOVE_RETREAT')
+
+    def _handle_return_init_pose(self):
+        if self._state_elapsed() > self._param_float('return_init_timeout_sec'):
+            self.get_logger().error('RETURN_INIT_POSE timeout.')
+            self._enter_recover('RETURN_INIT_POSE timeout')
+            return
+
+        if self.pending_speed_profile is not None:
+            return
+
+        if self.last_joint_pos is None:
+            return
+
+        if not self.state_command_sent:
+            if not self._executor_accepting():
+                return
+            init_deg = list(self.get_parameter('final_init_joint_pos_deg').value)
+            init_rad = [math.radians(float(v)) for v in init_deg]
+            self._publish_joint_target(init_rad)
+            self.state_command_sent = True
+            self.stage_motion_started = True
+            self.get_logger().info(
+                f'RETURN_INIT_POSE: sent joint target [{[f"{v:.1f}" for v in init_deg]}] deg.')
+            return
+
+        if self.last_joint_vel is None:
+            return
+
+        max_speed = max(abs(float(v)) for v in self.last_joint_vel)
+        if max_speed > self._param_float('joint_speed_safe_threshold'):
+            self.settle_start_time = None
+            return
+
+        if self.settle_start_time is None:
+            self.settle_start_time = self._now_sec()
+            return
+
+        if self._now_sec() - self.settle_start_time >= self._param_float('gripper_settle_sec'):
+            self.get_logger().info('Return init pose reached; cycle complete.')
+            self._finish_cycle()
 
     def _handle_move_retreat(self):
         self._set_speed_profile('fast')
