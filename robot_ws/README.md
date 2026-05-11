@@ -35,6 +35,8 @@ source install/setup.bash
 sudo airbot_server -i can1 -p 50001
 ```
 
+> **注意：** 在确认 `airbot_server` 已在端口 50001 正常监听之前，不要启动终端 1 的 `open_loop_grasp.launch.py`。否则 `arm_executor_node` 会因无法连接 AIRBOT SDK 而持续报错。
+
 终端 1：
 
 ```bash
