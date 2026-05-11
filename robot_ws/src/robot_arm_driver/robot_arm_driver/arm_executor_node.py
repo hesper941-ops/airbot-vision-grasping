@@ -358,8 +358,12 @@ class ArmExecutorNode(Node):
             self.get_logger().info(f'Executor status: DONE {command_type}')
             self._publish_executor_status(self.DONE)
         except Exception as exc:
+            current_end_pose = self._current_end_pose_for_log()
+            sdk_output = getattr(self.arm, 'last_sdk_output', '')
             self._set_error(
-                f'Motion command failed: {command_type} target={payload}: {exc}')
+                f'Motion command failed: command_type={command_type}, '
+                f'target={payload}, current_end_pose={current_end_pose}, '
+                f'captured SDK/logging output={sdk_output}: {exc}')
             return
 
         self._publish_executor_status(self.IDLE)
@@ -431,6 +435,15 @@ class ArmExecutorNode(Node):
     def _set_error(self, message: str):
         self.get_logger().error(message)
         self._publish_executor_status(self.ERROR)
+
+    def _current_end_pose_for_log(self):
+        try:
+            pose = self.arm.get_end_pose()
+            if pose is None or len(pose) < 1:
+                return None
+            return list(pose[0])
+        except Exception as exc:
+            return f'unavailable: {exc}'
 
     def _copy_state_msg(self, msg: ArmJointState) -> ArmJointState:
         copied = ArmJointState()

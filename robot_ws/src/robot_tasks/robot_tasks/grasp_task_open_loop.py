@@ -552,7 +552,13 @@ class GraspTaskOpenLoop(Node):
                 'MOVE_PRE_GRASP', target, pre_grasp=pre_grasp)
             return pre_grasp
         except Exception as exc:
-            self.get_logger().error(f'MOVE_PRE_GRASP safety validation failed: {exc}')
+            self.get_logger().error(
+                f'MOVE_PRE_GRASP safety validation failed: {exc}; '
+                f'current_approach_mode={self.current_approach_mode}, '
+                f'target_base={self._fmt_xyz(target)}, '
+                f'active_target_base={self._fmt_xyz(self.active_target_base) if self.active_target_base else None}, '
+                f'last_seen_target_base={self._fmt_xyz(self.last_seen_target_base) if self.last_seen_target_base else None}, '
+                f'workspace_limits={self.planner.workspace_limits}.')
             return None
 
     def _compute_grasp_from_active_target(self):
@@ -589,7 +595,19 @@ class GraspTaskOpenLoop(Node):
             self._log_waypoint_safety('MOVE_GRASP', target, grasp=grasp)
             return grasp
         except Exception as exc:
-            self.get_logger().error(f'MOVE_GRASP safety validation failed: {exc}')
+            pre_grasp = None
+            try:
+                pre_grasp = self.planner.compute_safe_pre_grasp(target)
+            except Exception:
+                pass
+            self.get_logger().error(
+                f'MOVE_GRASP safety validation failed: {exc}; '
+                f'current_approach_mode={self.current_approach_mode}, '
+                f'target_base={self._fmt_xyz(target)}, '
+                f'pre_grasp={self._fmt_xyz(pre_grasp) if pre_grasp else None}, '
+                f'active_target_base={self._fmt_xyz(self.active_target_base) if self.active_target_base else None}, '
+                f'last_seen_target_base={self._fmt_xyz(self.last_seen_target_base) if self.last_seen_target_base else None}, '
+                f'workspace_limits={self.planner.workspace_limits}.')
             return None
 
     def _log_waypoint_safety(self, state_name: str, target: list, pre_grasp=None, grasp=None):
@@ -859,6 +877,18 @@ class GraspTaskOpenLoop(Node):
             self._handle_approach_failure(f'{state_name} invalid motion goal')
             return
         full_goal = [float(full_goal[0]), float(full_goal[1]), float(full_goal[2])]
+        try:
+            full_goal = self.planner.validate_waypoint(
+                full_goal,
+                is_final_grasp=(state_name == 'MOVE_GRASP'),
+            )
+        except Exception as exc:
+            self.get_logger().error(
+                f'{state_name}: full_goal outside safety constraints: {exc}; '
+                f'current_approach_mode={self.current_approach_mode}, '
+                f'workspace_limits={self.planner.workspace_limits}.')
+            self._handle_approach_failure(f'{state_name} full_goal unsafe: {exc}')
+            return
 
         tolerance = self._position_tolerance()
         distance_to_full = self._distance(self.last_end_pose, full_goal)

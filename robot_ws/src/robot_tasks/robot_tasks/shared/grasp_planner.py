@@ -112,7 +112,7 @@ class GraspPlanner:
         min_z = self.final_grasp_z if is_final_grasp else self.safe_motion_z
         if point[2] < min_z:
             point[2] = min_z
-        self._validate_workspace(point)
+        self._validate_workspace(point, label='waypoint')
         return point
 
     def validate_approach_direction(self, current_xyz: list, target_xyz: list, mode=None):
@@ -268,21 +268,39 @@ class GraspPlanner:
             min(max(float(xyz[2]), self.z_min), self.z_max),
         ]
 
-    def _validate_workspace(self, xyz: list):
+    def _validate_workspace(self, xyz: list, label: str = 'waypoint'):
         for index, value in enumerate(xyz):
             low = [self.x_min, self.y_min, self.z_min][index]
             high = [self.x_max, self.y_max, self.z_max][index]
             if not low <= float(value) <= high:
                 axis = 'xyz'[index]
                 raise ValueError(
-                    f"Waypoint {axis}={value:.3f} is outside workspace [{low:.3f}, {high:.3f}].")
+                    f"{label} {axis}={value:.3f} is outside workspace_limits "
+                    f"{axis}=[{low:.3f}, {high:.3f}], point={self._fmt_xyz(xyz)}, "
+                    f"workspace_limits={self.workspace_limits}.")
 
     def _validate_target(self, target_xyz: list) -> list:
         target = self._validate_xyz(target_xyz, name='target_xyz')
+        self._validate_workspace(target, label='target_base')
         if self.reject_target_below_table and target[2] < self.table_z:
             raise ValueError(
                 f"Target z={target[2]:.3f} is below table_z={self.table_z:.3f}.")
         return target
+
+    @property
+    def workspace_limits(self) -> dict:
+        return {
+            'x_min': self.x_min,
+            'x_max': self.x_max,
+            'y_min': self.y_min,
+            'y_max': self.y_max,
+            'z_min': self.z_min,
+            'z_max': self.z_max,
+        }
+
+    @staticmethod
+    def _fmt_xyz(xyz: list) -> str:
+        return f"({float(xyz[0]):.3f}, {float(xyz[1]):.3f}, {float(xyz[2]):.3f})"
 
     @staticmethod
     def _validate_xyz(xyz: list, name: str = 'xyz') -> list:

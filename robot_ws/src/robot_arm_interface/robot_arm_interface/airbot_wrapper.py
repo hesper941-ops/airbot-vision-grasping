@@ -31,6 +31,7 @@
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import dataclass, field
 import io
+import logging
 import math
 import time
 from airbot_py.arm import AIRBOTPlay, RobotMode, SpeedProfile
@@ -42,6 +43,8 @@ class ArmSafetyConfig:
     workspace_min: list = field(default_factory=lambda: [0.10, -0.45, 0.02])
     workspace_max: list = field(default_factory=lambda: [1.00, 0.50, 0.70])
     max_cartesian_step: float = 0.10
+    command_reached_tolerance_m: float = 0.04
+    command_verify_timeout_sec: float = 1.5
     max_joint_speed: float = 1.20
     joint_limit_margin: float = 0.08
     joint_limits: list = field(default_factory=lambda: [
@@ -68,6 +71,7 @@ class AirbotWrapper:
         self.port = port
         self.robot = None
         self.safety = safety_config or ArmSafetyConfig()
+        self.last_sdk_output = ""
 
     def connect(self, speed_profile="default"):
         """Connect to the AIRBOT server and set the initial speed profile."""
@@ -130,6 +134,10 @@ class AirbotWrapper:
             "move_with_cart_waypoints",
             self.robot.move_with_cart_waypoints,
             waypoints,
+        )
+        self._verify_cartesian_reached(
+            list(waypoints[-1][0]),
+            command_name="move_with_cart_waypoints",
         )
 
     def move_to_cart_target_with_current_orientation(self, target_xyz):
@@ -311,15 +319,28 @@ class AirbotWrapper:
 
         stdout = io.StringIO()
         stderr = io.StringIO()
+        log_capture = io.StringIO()
+        log_handler = logging.StreamHandler(log_capture)
+        log_handler.setLevel(logging.DEBUG)
+        root_logger = logging.getLogger()
+        old_root_level = root_logger.level
+        root_logger.addHandler(log_handler)
+        if root_logger.level > logging.DEBUG:
+            root_logger.setLevel(logging.DEBUG)
+
         try:
             with redirect_stdout(stdout), redirect_stderr(stderr):
                 result = func(*args, **kwargs)
         except Exception as exc:
-            output = f"{stdout.getvalue()} {stderr.getvalue()}".strip()
+            output = self._collect_sdk_output(stdout, stderr, log_capture)
             detail = f"; sdk output: {output}" if output else ""
             raise RuntimeError(f"SDK call {name} raised {exc}{detail}") from exc
+        finally:
+            root_logger.removeHandler(log_handler)
+            root_logger.setLevel(old_root_level)
 
-        output = f"{stdout.getvalue()} {stderr.getvalue()}".strip()
+        output = self._collect_sdk_output(stdout, stderr, log_capture)
+        self.last_sdk_output = output
         lower_output = output.lower()
         if any(token in lower_output for token in self.FAILURE_TEXT):
             raise RuntimeError(f"SDK call {name} reported failure: {output}")
@@ -330,3 +351,36 @@ class AirbotWrapper:
                 f"SDK call {name} failed: returned {result!r}{detail}")
 
         return result
+
+    def _collect_sdk_output(self, stdout, stderr, log_capture) -> str:
+        chunks = [
+            stdout.getvalue().strip(),
+            stderr.getvalue().strip(),
+            log_capture.getvalue().strip(),
+        ]
+        return "\n".join(chunk for chunk in chunks if chunk)
+
+    def _verify_cartesian_reached(self, target_xyz, command_name="cartesian"):
+        tolerance = float(self.safety.command_reached_tolerance_m)
+        timeout = float(self.safety.command_verify_timeout_sec)
+        deadline = time.time() + max(0.0, timeout)
+        last_position = None
+        last_distance = None
+
+        while True:
+            pose = self.get_end_pose()
+            if pose is None or len(pose) < 1:
+                raise RuntimeError(
+                    f"{command_name} reached check failed: cannot read end_pose; "
+                    f"target={target_xyz}; sdk output={self.last_sdk_output}")
+            last_position = list(pose[0])
+            last_distance = self._distance(last_position, target_xyz)
+            if last_distance <= tolerance:
+                return True
+            if time.time() >= deadline:
+                raise RuntimeError(
+                    f"{command_name} motion failed: target={target_xyz}, "
+                    f"current_end_pose={last_position}, "
+                    f"distance={last_distance:.4f}m > tolerance={tolerance:.4f}m; "
+                    f"captured SDK/logging output={self.last_sdk_output}")
+            time.sleep(0.05)
