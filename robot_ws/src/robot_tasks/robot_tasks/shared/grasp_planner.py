@@ -17,6 +17,14 @@ class GraspPlanner:
         self.grasp_z_offset = config.get('grasp_z_offset', 0.0)
         self.lift_z_offset = config.get('lift_z_offset', 0.10)
         self.safe_pose = config.get('safe_pose', [0.35, 0.00, 0.35])
+        self.approach_mode = str(config.get('approach_mode', 'top_down')).strip().lower()
+        self.table_z = float(config.get('table_z', 0.0))
+        self.table_clearance = float(config.get('table_clearance', 0.04))
+        self.final_grasp_clearance = float(config.get('final_grasp_clearance', 0.015))
+        self.front_approach_x_offset = float(config.get('front_approach_x_offset', -0.10))
+        self.front_approach_z_offset = float(config.get('front_approach_z_offset', 0.05))
+        self.min_safe_motion_z = float(config.get('min_safe_motion_z', 0.08))
+        self.reject_target_below_table = bool(config.get('reject_target_below_table', True))
         self.joint6_compensation_deg = config.get('joint6_compensation_deg', 90.0)
         # Conservative J6 range based on AIRBOT Play official specs.
         # Confirm exact hardware model before widening these defaults.
@@ -33,31 +41,104 @@ class GraspPlanner:
 
     def compute_pre_grasp(self, target_xyz: list) -> list:
         """Return the pre-grasp point above the target."""
-        return self._clamp([
-            target_xyz[0],
-            target_xyz[1],
-            target_xyz[2] + self.pre_grasp_z_offset,
-        ])
+        return self.compute_safe_pre_grasp(target_xyz)
 
     def compute_grasp(self, target_xyz: list) -> list:
         """Return the final grasp point near the target."""
-        return self._clamp([
-            target_xyz[0],
-            target_xyz[1],
-            target_xyz[2] + self.grasp_z_offset,
-        ])
+        return self.compute_safe_grasp(target_xyz)
 
     def compute_lift(self, current_xyz: list) -> list:
         """Return a vertical lift target based on the current end-effector pose."""
-        return self._clamp([
+        return self.compute_safe_lift(current_xyz)
+
+    def compute_safe_pre_grasp(self, target_xyz: list) -> list:
+        """Return a safe pre-grasp waypoint for top-down or front approach."""
+        target = self._validate_target(target_xyz)
+        safe_z = self.safe_motion_z
+
+        if self.approach_mode == 'top_down':
+            waypoint = [
+                target[0],
+                target[1],
+                max(target[2] + self.pre_grasp_z_offset, safe_z),
+            ]
+        elif self.approach_mode == 'front':
+            waypoint = [
+                target[0] + self.front_approach_x_offset,
+                target[1],
+                max(target[2] + self.front_approach_z_offset, safe_z),
+            ]
+        else:
+            raise ValueError(
+                f"Unsupported approach_mode={self.approach_mode!r}; expected top_down or front.")
+
+        return self.validate_waypoint(waypoint, is_final_grasp=False)
+
+    def compute_safe_grasp(self, target_xyz: list) -> list:
+        """Return a final grasp waypoint that never goes below table clearance."""
+        target = self._validate_target(target_xyz)
+        waypoint = [
+            target[0],
+            target[1],
+            max(target[2] + self.grasp_z_offset, self.final_grasp_z),
+        ]
+        return self.validate_waypoint(waypoint, is_final_grasp=True)
+
+    def compute_safe_lift(self, current_xyz: list) -> list:
+        """Return a vertical lift target without dragging sideways."""
+        current = self._validate_xyz(current_xyz, name='current_xyz')
+        return self.validate_waypoint([
             current_xyz[0],
             current_xyz[1],
-            min(current_xyz[2] + self.lift_z_offset, self.z_max),
-        ])
+            max(current[2] + self.lift_z_offset, self.safe_motion_z),
+        ], is_final_grasp=False)
+
+    def validate_waypoint(self, xyz: list, is_final_grasp: bool = False) -> list:
+        """Validate and clamp a waypoint while enforcing table clearance."""
+        point = self._clamp(self._validate_xyz(xyz, name='waypoint'))
+        min_z = self.final_grasp_z if is_final_grasp else self.safe_motion_z
+        if point[2] < min_z:
+            point[2] = min_z
+        if point[2] < self.z_min or point[2] > self.z_max:
+            raise ValueError(
+                f"Waypoint z={point[2]:.3f} is outside workspace [{self.z_min:.3f}, {self.z_max:.3f}].")
+        return point
+
+    def validate_approach_direction(self, current_xyz: list, target_xyz: list, mode=None):
+        """Reject approach moves that would come from under the target."""
+        current = self._validate_xyz(current_xyz, name='current_xyz')
+        target = self._validate_target(target_xyz)
+        selected_mode = (mode or self.approach_mode).strip().lower()
+
+        if selected_mode == 'top_down':
+            pre_grasp = self.compute_safe_pre_grasp(target)
+            if current[2] + 1e-6 < target[2]:
+                raise ValueError(
+                    f"Unsafe top-down approach: current z={current[2]:.3f} is below target z={target[2]:.3f}.")
+            if pre_grasp[2] + 1e-6 < target[2]:
+                raise ValueError(
+                    f"Unsafe top-down pre-grasp z={pre_grasp[2]:.3f} is below target z={target[2]:.3f}.")
+        elif selected_mode == 'front':
+            if current[2] + 1e-6 < self.safe_motion_z:
+                raise ValueError(
+                    f"Unsafe front approach: current z={current[2]:.3f} below safe z={self.safe_motion_z:.3f}.")
+        else:
+            raise ValueError(
+                f"Unsupported approach_mode={selected_mode!r}; expected top_down or front.")
+
+        return True
 
     def get_safe_pose(self) -> list:
         """Return the configured safe retreat pose."""
-        return list(self.safe_pose)
+        return self.validate_waypoint(self.safe_pose, is_final_grasp=False)
+
+    @property
+    def safe_motion_z(self) -> float:
+        return max(self.table_z + self.table_clearance, self.min_safe_motion_z)
+
+    @property
+    def final_grasp_z(self) -> float:
+        return self.table_z + self.final_grasp_clearance
 
     @staticmethod
     def distance(a: list, b: list) -> float:
@@ -126,3 +207,19 @@ class GraspPlanner:
             min(max(float(xyz[1]), self.y_min), self.y_max),
             min(max(float(xyz[2]), self.z_min), self.z_max),
         ]
+
+    def _validate_target(self, target_xyz: list) -> list:
+        target = self._validate_xyz(target_xyz, name='target_xyz')
+        if self.reject_target_below_table and target[2] < self.table_z:
+            raise ValueError(
+                f"Target z={target[2]:.3f} is below table_z={self.table_z:.3f}.")
+        return target
+
+    @staticmethod
+    def _validate_xyz(xyz: list, name: str = 'xyz') -> list:
+        if xyz is None or len(xyz) != 3:
+            raise ValueError(f"{name} must contain x, y, z.")
+        point = [float(xyz[0]), float(xyz[1]), float(xyz[2])]
+        if not all(math.isfinite(v) for v in point):
+            raise ValueError(f"{name} contains non-finite coordinates.")
+        return point

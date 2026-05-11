@@ -358,7 +358,8 @@ class ArmExecutorNode(Node):
             self.get_logger().info(f'Executor status: DONE {command_type}')
             self._publish_executor_status(self.DONE)
         except Exception as exc:
-            self._set_error(f'{command_type} command failed: {exc}')
+            self._set_error(
+                f'Motion command failed: {command_type} target={payload}: {exc}')
             return
 
         self._publish_executor_status(self.IDLE)

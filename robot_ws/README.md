@@ -102,8 +102,10 @@ IDLE
 异常统一进入：
 
 ```text
-RECOVER -> clear_error (周期重发) -> open gripper -> move safe_pose (分段) -> IDLE
+RECOVER -> clear_error (周期重发) -> open gripper -> vertical lift -> move safe_pose (分段) -> IDLE
 ```
+
+如果底层 AIRBOT SDK 报 `move group planning PTP failed`、`gRPC error`、`planning failed`、`motion failed` 等运动失败，`airbot_wrapper` 会抛出异常，`arm_executor_node` 发布 `/robot_arm/executor_status=ERROR`。任务层收到 `ERROR` 后进入 `RECOVER`，不会把失败动作标记成 `DONE`。
 
 ## 眼在手上 last-seen fallback 抓取策略
 
@@ -114,6 +116,7 @@ RECOVER -> clear_error (周期重发) -> open gripper -> move safe_pose (分段)
 - 如果 `/visual_target_base` 持续更新（即 detector 持续检测到目标），任务节点持续更新 `active_target_base`，每次分段都使用最新的 `base_link` 坐标。
 - 如果目标短暂离开相机视野，任务节点使用 `last_seen_target_base`（最后一次真实检测到目标的 `base_link` 坐标）继续分段靠近。
 - 如果超过 `last_seen_target_max_age_sec`（默认 5 s）仍没有新目标到达，状态机进入 `RECOVER`，避免盲抓。
+- 运动过程中如果新目标相对 `active_target_base` 跳变超过 `max_target_jump_m` 或 `max_target_z_jump_m`，任务层会拒绝这次更新，避免 last-seen 目标被明显异常的视觉点污染。
 
 ### 职责划分
 
@@ -128,6 +131,20 @@ RECOVER -> clear_error (周期重发) -> open gripper -> move safe_pose (分段)
 - `last_seen_target_max_age_sec`（默认 `5.0` s）：last-seen 目标的最大有效年龄。超过后 `_get_active_target_or_last_seen()` 返回 `None`，触发 `RECOVER`。
 - `update_target_during_motion`（默认 `true`）：分段靠近过程中是否根据新到达的 `/visual_target_base` 更新 `active_target_base`。
 - `freeze_target_before_close`（默认 `true`）：夹爪闭合前冻结 `active_target_base`，避免闭合瞬间目标坐标跳动。
+
+## 抓取方向与桌面安全约束
+
+当前默认采用 `top_down` 上方抓取。机械臂靠近物块时，只允许从上方或前方靠近；禁止从物块下方或低于桌面安全高度的路径靠近，以避免打到桌子。
+
+`GraspPlanner` 会根据 `approach_mode` 生成安全 waypoint：
+
+- `top_down`：`pre_grasp` 位于目标正上方，`MOVE_GRASP` 主要做竖直下降。
+- `front`：`pre_grasp` 位于目标前方，并保持 `front_approach_z_offset` 和桌面安全高度。
+- 普通中间 waypoint 的 z 不低于 `table_z + table_clearance` 和 `min_safe_motion_z`。
+- 最终抓取点的 z 不低于 `table_z + final_grasp_clearance`。
+- 如果当前末端低于安全高度，任务层会先原地竖直抬升，再横向移动到预抓取点或安全撤退点。
+
+如果 `reject_target_below_table=true` 且目标 z 低于 `table_z`，planner 会拒绝该目标并触发恢复流程。当前配置临时收窄工作空间，避免太靠边导致保持姿态的 PTP/笛卡尔规划失败；后续标定和路径验证稳定后再放宽。
 
 ## Cartesian 分段运动
 

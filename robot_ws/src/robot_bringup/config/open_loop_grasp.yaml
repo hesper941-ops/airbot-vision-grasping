@@ -22,9 +22,17 @@ grasp_task_open_loop:
     base_frame: base_link
     allow_empty_target_frame: false
 
-    pre_grasp_z_offset: 0.12
-    grasp_z_offset: 0.0
-    lift_z_offset: 0.10
+    approach_mode: "top_down"
+    table_z: 0.0
+    table_clearance: 0.04
+    final_grasp_clearance: 0.015
+    pre_grasp_z_offset: 0.14
+    grasp_z_offset: 0.02
+    lift_z_offset: 0.12
+    min_safe_motion_z: 0.08
+    reject_target_below_table: true
+    front_approach_x_offset: -0.10
+    front_approach_z_offset: 0.05
     safe_pose: [0.35, 0.0, 0.35]
     joint6_compensation_deg: 90.0
     # Conservative J6 range based on AIRBOT Play official specs.
@@ -46,12 +54,14 @@ grasp_task_open_loop:
     update_target_during_motion: true
     freeze_target_before_close: true
     require_second_visual_confirm: false
+    max_target_jump_m: 0.08
+    max_target_z_jump_m: 0.08
 
     workspace_limits:
       x_min: 0.10
-      x_max: 1.00
-      y_min: -0.45
-      y_max: 0.50
+      x_max: 0.65
+      y_min: -0.35
+      y_max: 0.35
       z_min: 0.02
       z_max: 0.70
 

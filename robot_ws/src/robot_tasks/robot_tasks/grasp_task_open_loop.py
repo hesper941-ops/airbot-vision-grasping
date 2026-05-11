@@ -115,6 +115,14 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('grasp_z_offset', 0.0)
         self.declare_parameter('lift_z_offset', 0.10)
         self.declare_parameter('safe_pose', [0.35, 0.0, 0.35])
+        self.declare_parameter('approach_mode', 'top_down')
+        self.declare_parameter('table_z', 0.0)
+        self.declare_parameter('table_clearance', 0.04)
+        self.declare_parameter('final_grasp_clearance', 0.015)
+        self.declare_parameter('front_approach_x_offset', -0.10)
+        self.declare_parameter('front_approach_z_offset', 0.05)
+        self.declare_parameter('min_safe_motion_z', 0.08)
+        self.declare_parameter('reject_target_below_table', True)
         self.declare_parameter('joint6_compensation_deg', 90.0)
         # Conservative J6 range based on AIRBOT Play official specs.
         # Confirm exact hardware model before widening this range.
@@ -135,6 +143,8 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('update_target_during_motion', True)
         self.declare_parameter('freeze_target_before_close', True)
         self.declare_parameter('require_second_visual_confirm', False)
+        self.declare_parameter('max_target_jump_m', 0.08)
+        self.declare_parameter('max_target_z_jump_m', 0.08)
 
         self.declare_parameter('workspace_limits.x_min', 0.10)
         self.declare_parameter('workspace_limits.x_max', 1.00)
@@ -169,6 +179,14 @@ class GraspTaskOpenLoop(Node):
             'grasp_z_offset': self.get_parameter('grasp_z_offset').value,
             'lift_z_offset': self.get_parameter('lift_z_offset').value,
             'safe_pose': self.get_parameter('safe_pose').value,
+            'approach_mode': self.get_parameter('approach_mode').value,
+            'table_z': self.get_parameter('table_z').value,
+            'table_clearance': self.get_parameter('table_clearance').value,
+            'final_grasp_clearance': self.get_parameter('final_grasp_clearance').value,
+            'front_approach_x_offset': self.get_parameter('front_approach_x_offset').value,
+            'front_approach_z_offset': self.get_parameter('front_approach_z_offset').value,
+            'min_safe_motion_z': self.get_parameter('min_safe_motion_z').value,
+            'reject_target_below_table': self.get_parameter('reject_target_below_table').value,
             'joint6_compensation_deg': self.get_parameter('joint6_compensation_deg').value,
             'joint6_min_rad': self.get_parameter('joint6_min_rad').value,
             'joint6_max_rad': self.get_parameter('joint6_max_rad').value,
@@ -189,6 +207,10 @@ class GraspTaskOpenLoop(Node):
         self.latest_target = msg
         self.latest_target_time = self._now_sec()
         target_base = [float(msg.x), float(msg.y), float(msg.z)]
+
+        if self._reject_target_jump(target_base):
+            return
+
         self.last_seen_target_base = target_base
         self.last_seen_target_time = self.latest_target_time
 
@@ -215,6 +237,24 @@ class GraspTaskOpenLoop(Node):
         elif self.task_state not in ('WAIT_PRE_TARGET', 'WAIT_GRASP_TARGET'):
             self.get_logger().debug(
                 f'Target cached during {self.task_state}; active target is unchanged.')
+
+    def _reject_target_jump(self, target_base: list) -> bool:
+        if self.active_target_base is None:
+            return False
+        if self.task_state not in ('MOVE_PRE_GRASP', 'MOVE_GRASP'):
+            return False
+
+        distance = self._distance(self.active_target_base, target_base)
+        z_jump = abs(float(target_base[2]) - float(self.active_target_base[2]))
+        max_distance = self._param_float('max_target_jump_m')
+        max_z_jump = self._param_float('max_target_z_jump_m')
+        if distance <= max_distance and z_jump <= max_z_jump:
+            return False
+
+        self.get_logger().warning(
+            f'Reject visual target jump: old={self._fmt_xyz(self.active_target_base)}, '
+            f'new={self._fmt_xyz(target_base)}, dist={distance:.3f}m.')
+        return True
 
     def joint_state_callback(self, msg: ArmJointState):
         if msg.joint_pos and len(msg.joint_pos) >= 6:
@@ -434,14 +474,72 @@ class GraspTaskOpenLoop(Node):
         if target is None:
             return None
         self.pre_target = list(target)
-        return self.planner.compute_pre_grasp(target)
+
+        try:
+            pre_grasp = self.planner.compute_safe_pre_grasp(target)
+            if self.last_end_pose is not None:
+                safe_z = max(float(self.planner.safe_motion_z), float(pre_grasp[2]))
+                current_z = float(self.last_end_pose[2])
+                if current_z < float(target[2]) or current_z < self.planner.safe_motion_z:
+                    lift_first = [
+                        float(self.last_end_pose[0]),
+                        float(self.last_end_pose[1]),
+                        safe_z,
+                    ]
+                    lift_first = self.planner.validate_waypoint(lift_first)
+                    self._log_waypoint_safety(
+                        'MOVE_PRE_GRASP', target, pre_grasp=lift_first)
+                    return lift_first
+                self.planner.validate_approach_direction(
+                    self.last_end_pose, target, self.planner.approach_mode)
+            self._log_waypoint_safety(
+                'MOVE_PRE_GRASP', target, pre_grasp=pre_grasp)
+            return pre_grasp
+        except Exception as exc:
+            self.get_logger().error(f'MOVE_PRE_GRASP safety validation failed: {exc}')
+            return None
 
     def _compute_grasp_from_active_target(self):
         target = self._get_active_target_or_last_seen()
         if target is None:
             return None
         self.grasp_target = list(target)
-        return self.planner.compute_grasp(target)
+
+        try:
+            grasp = self.planner.compute_safe_grasp(target)
+            if self.last_end_pose is not None:
+                self.planner.validate_approach_direction(
+                    self.last_end_pose, target, self.planner.approach_mode)
+                if self.planner.approach_mode == 'top_down':
+                    xy_delta = self._distance(
+                        [self.last_end_pose[0], self.last_end_pose[1], 0.0],
+                        [grasp[0], grasp[1], 0.0],
+                    )
+                    if xy_delta > max(self._position_tolerance(), 0.03):
+                        raise ValueError(
+                            f'top_down grasp requires near-vertical descent; xy_delta={xy_delta:.3f}m.')
+                    if float(grasp[2]) > float(self.last_end_pose[2]) + self._position_tolerance():
+                        raise ValueError(
+                            f'top_down grasp would approach from below: current_z={self.last_end_pose[2]:.3f}, grasp_z={grasp[2]:.3f}.')
+            self._log_waypoint_safety('MOVE_GRASP', target, grasp=grasp)
+            return grasp
+        except Exception as exc:
+            self.get_logger().error(f'MOVE_GRASP safety validation failed: {exc}')
+            return None
+
+    def _log_waypoint_safety(self, state_name: str, target: list, pre_grasp=None, grasp=None):
+        parts = [
+            f'{state_name} safety:',
+            f'approach_mode={self.planner.approach_mode}',
+            f'target_base={self._fmt_xyz(target)}',
+            f'table_z={self.planner.table_z:.3f}',
+            f'min_safe_motion_z={self.planner.min_safe_motion_z:.3f}',
+        ]
+        if pre_grasp is not None:
+            parts.append(f'pre_grasp={self._fmt_xyz(pre_grasp)}')
+        if grasp is not None:
+            parts.append(f'grasp={self._fmt_xyz(grasp)}')
+        self.get_logger().info(', '.join(parts))
 
     def _get_active_target_or_last_seen(self):
         now = self._now_sec()
@@ -520,7 +618,7 @@ class GraspTaskOpenLoop(Node):
 
         self._handle_cartesian_motion(
             'MOVE_LIFT',
-            lambda: self.planner.compute_lift(self.last_end_pose),
+            lambda: self.planner.compute_safe_lift(self.last_end_pose),
             on_done=lambda: self._transition('MOVE_RETREAT'),
         )
 
@@ -528,7 +626,7 @@ class GraspTaskOpenLoop(Node):
         self._set_speed_profile('fast')
         self._handle_cartesian_motion(
             'MOVE_RETREAT',
-            lambda: self.planner.get_safe_pose(),
+            lambda: self._compute_safe_retreat_goal(),
             on_done=self._finish_cycle,
         )
 
@@ -560,18 +658,42 @@ class GraspTaskOpenLoop(Node):
                 return
             if self._now_sec() - (self.gripper_settle_start or self._now_sec()) < self._param_float('gripper_settle_sec'):
                 return
-            self.recover_phase = 'RETREAT'
+            self.recover_phase = 'LIFT'
             self._reset_stage_vars()
             self._set_speed_profile('fast')
+            return
+
+        if self.recover_phase == 'LIFT':
+            if not self._fresh_end_pose_available():
+                return
+            self._handle_cartesian_motion(
+                'RECOVER_LIFT',
+                lambda: self.planner.compute_safe_lift(self.last_end_pose),
+                on_done=self._advance_recover_to_retreat,
+                timeout_param='recover_timeout_sec',
+            )
             return
 
         if self.recover_phase == 'RETREAT':
             self._handle_cartesian_motion(
                 'RECOVER_RETREAT',
-                lambda: self.planner.get_safe_pose(),
+                lambda: self._compute_safe_retreat_goal(),
                 on_done=self._finish_recover,
                 timeout_param='recover_timeout_sec',
             )
+
+    def _advance_recover_to_retreat(self):
+        self.recover_phase = 'RETREAT'
+        self._reset_stage_vars()
+
+    def _compute_safe_retreat_goal(self):
+        if self.last_end_pose is not None and float(self.last_end_pose[2]) < self.planner.safe_motion_z:
+            return self.planner.validate_waypoint([
+                float(self.last_end_pose[0]),
+                float(self.last_end_pose[1]),
+                self.planner.safe_motion_z,
+            ])
+        return self.planner.get_safe_pose()
 
     def _handle_cartesian_motion(self, state_name: str, goal_fn, on_done, timeout_param='motion_timeout_sec'):
         """Step-by-step Cartesian movement with per-step settle gating.
@@ -595,7 +717,12 @@ class GraspTaskOpenLoop(Node):
 
         # Resolve the full (final) goal every tick so dynamic goals (e.g. lift)
         # reflect the latest end_pose.
-        full_goal = goal_fn()
+        try:
+            full_goal = goal_fn()
+        except Exception as exc:
+            self.get_logger().error(f'{state_name}: failed to compute motion goal: {exc}')
+            self._enter_recover()
+            return
         if full_goal is None or len(full_goal) != 3:
             self.get_logger().error(f'{state_name}: invalid motion goal.')
             self._enter_recover()
@@ -629,6 +756,21 @@ class GraspTaskOpenLoop(Node):
             max_step = self._param_float('max_cartesian_step')
             step_goal = self.planner.limit_step(
                 self.last_end_pose, full_goal, max_step)
+            is_final_step = self._distance(step_goal, full_goal) <= tolerance
+            if state_name == 'MOVE_GRASP' and not is_final_step:
+                step_goal = self.planner.validate_waypoint(
+                    [
+                        step_goal[0],
+                        step_goal[1],
+                        max(float(step_goal[2]), self.planner.safe_motion_z),
+                    ],
+                    is_final_grasp=False,
+                )
+            else:
+                step_goal = self.planner.validate_waypoint(
+                    step_goal,
+                    is_final_grasp=(state_name == 'MOVE_GRASP' and is_final_step),
+                )
             self.active_motion_goal = [
                 float(step_goal[0]),
                 float(step_goal[1]),
