@@ -10,12 +10,9 @@ arm_executor_node:
     do_init: true
     init_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 90.0]
 
-    # Conservative AIRBOT Play joint limits.
-    # Confirm the exact hardware model before widening these values.
-    # J1 [-180°, +120°], J2 [-170°, +10°], J3 [-5°, +180°],
-    # J4 [-148°, +148°], J5 [-100°, +100°], J6 [-170°, +170°].
-    joint_min_rad: [-3.1416, -2.9671, -0.0873, -2.5831, -1.7453, -2.9671]
-    joint_max_rad: [ 2.0944,  0.1745,  3.1416,  2.5831,  1.7453,  2.9671]
+    # Joint limits aligned with ArmSafetyConfig defaults in airbot_wrapper.py.
+    joint_min_rad: [-3.1416, -2.6000, -2.6000, -3.1416, -2.6000, -3.1416]
+    joint_max_rad: [ 3.1416,  2.6000,  2.6000,  3.1416,  2.6000,  3.1416]
 
 grasp_task_open_loop:
   ros__parameters:
