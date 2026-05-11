@@ -21,7 +21,7 @@ AIRBOT Play 机械臂侧 ROS 2 工作区。
 ## 编译
 
 ```bash
-cd /home/sunrise/robot/airbot-vision-grasping/robot_ws
+cd /home/sunrise/robot/robot_ws
 source /opt/ros/humble/setup.bash
 colcon build --symlink-install
 source install/setup.bash
@@ -39,8 +39,16 @@ sudo airbot_server -i can1 -p 50001
 
 ```bash
 source /opt/ros/humble/setup.bash
-source /home/sunrise/robot/airbot-vision-grasping/robot_ws/install/setup.bash
+source /home/sunrise/robot/robot_ws/install/setup.bash
 ros2 launch robot_bringup open_loop_grasp.launch.py
+```
+
+终端 2（视觉坐标桥）：
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/sunrise/robot/robot_ws/install/setup.bash
+python3 /home/sunrise/robot/hand_to_eye/camera_to_base_transform.py
 ```
 
 ## Topic
@@ -97,11 +105,29 @@ IDLE
 RECOVER -> clear_error (周期重发) -> open gripper -> move safe_pose (分段) -> IDLE
 ```
 
-## 眼在手上目标策略
+## 眼在手上 last-seen fallback 抓取策略
 
-当前眼在手上抓取策略为：分段靠近过程中，如果视觉还能看到目标，就持续更新 `base_link` 下的目标坐标；如果目标短暂离开视野，则使用最后一次看到的 `base_link` 坐标继续执行；如果丢失时间过长，则进入恢复流程。
+分段靠近过程（`MOVE_PRE_GRASP`、`MOVE_GRASP`）中，目标可能因为相机视角变化而短暂离开视野。为应对这一问题，任务层实现了 last-seen fallback。
 
-任务层只保存 `/visual_target_base` 的 `base_link` 坐标作为 last-seen fallback。视觉层不伪造旧目标，只发布真实检测到的新目标。
+### 行为
+
+- 如果 `/visual_target_base` 持续更新（即 detector 持续检测到目标），任务节点持续更新 `active_target_base`，每次分段都使用最新的 `base_link` 坐标。
+- 如果目标短暂离开相机视野，任务节点使用 `last_seen_target_base`（最后一次真实检测到目标的 `base_link` 坐标）继续分段靠近。
+- 如果超过 `last_seen_target_max_age_sec`（默认 5 s）仍没有新目标到达，状态机进入 `RECOVER`，避免盲抓。
+
+### 职责划分
+
+- **视觉桥接层** `hand_to_eye/camera_to_base_transform.py` 只发布真实 detector 输入产生的新 `/visual_target_base`。不 republish 旧目标、不伪造旧坐标。
+- **任务层** `robot_tasks/grasp_task_open_loop.py` 订阅 `/visual_target_base`，维护 `last_seen_target_base` 和 `active_target_base`，在目标短暂丢失时自行 fallback。
+- 视觉层仅提供 `no_recent_detector_target` 和 `target_timeout` warning 用于健康监控，不参与抓取决策。
+
+### 相关参数（任务层）
+
+- `use_last_seen_target_on_loss`（默认 `true`）：目标丢失时是否启用 last-seen fallback。
+- `visual_lost_grace_sec`（默认 `0.5` s）：短于此时间的目标丢失视为瞬时遮挡，不打印 warning。
+- `last_seen_target_max_age_sec`（默认 `5.0` s）：last-seen 目标的最大有效年龄。超过后 `_get_active_target_or_last_seen()` 返回 `None`，触发 `RECOVER`。
+- `update_target_during_motion`（默认 `true`）：分段靠近过程中是否根据新到达的 `/visual_target_base` 更新 `active_target_base`。
+- `freeze_target_before_close`（默认 `true`）：夹爪闭合前冻结 `active_target_base`，避免闭合瞬间目标坐标跳动。
 
 ## Cartesian 分段运动
 

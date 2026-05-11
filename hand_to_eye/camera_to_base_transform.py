@@ -171,8 +171,8 @@ class CameraToBaseTransformer(Node):
         self.declare_parameter('image_height', 480)
         self.declare_parameter('default_confidence', 0.85)
         self.declare_parameter('assume_target_stable', True)
-        self.declare_parameter('republish_rate_hz', 10.0)
-        self.declare_parameter('target_hold_sec', 0.8)
+        self.declare_parameter('republish_rate_hz', 1.0)
+        self.declare_parameter('target_hold_sec', 0.0)
         self.declare_parameter('target_timeout_sec', 1.5)
 
     def pose_callback(self, msg: PoseStamped):
@@ -233,33 +233,39 @@ class CameraToBaseTransformer(Node):
         )
 
     def republish_latest_target(self):
-        """Republish the last valid converted target during short detector gaps."""
+        """Monitor detector health; only republish when target_hold_sec > 0."""
         now = self.now_sec()
+
+        if self.last_detector_time_sec is not None:
+            detector_age = now - self.last_detector_time_sec
+            if detector_age > self.target_timeout_sec:
+                self.warn_throttled(
+                    'no_recent_detector_target',
+                    f'No new detector input for {detector_age:.2f}s.',
+                    2.0,
+                )
+
         if self.latest_target is None:
-            if self.last_detector_time_sec is not None:
-                age = now - self.last_detector_time_sec
-                if age > self.target_timeout_sec:
-                    self.warn_throttled(
-                        'no_recent_detector_target',
-                        f'No new visual target for {age:.2f}s.',
-                        2.0,
-                    )
             return
 
         age = now - self.latest_target.detected_time_sec
+
+        if age > self.target_timeout_sec:
+            self.warn_throttled(
+                'target_timeout',
+                f'No new visual target for {age:.2f}s.',
+                2.0,
+            )
+
+        if self.target_hold_sec <= 0.0:
+            return
+
         if age <= self.target_hold_sec:
-            self.latest_target.msg.header.stamp = self.get_clock().now().to_msg()
             self.target_pub.publish(self.latest_target.msg)
             self.info_throttled(
                 'holding_target',
                 f'Holding {self.latest_target.object_name}: '
                 f'base={fmt_xyz(self.latest_target.base_xyz)} age={age:.2f}s',
-                2.0,
-            )
-        elif age > self.target_timeout_sec:
-            self.warn_throttled(
-                'target_timeout',
-                f'No new visual target for {age:.2f}s.',
                 2.0,
             )
 
