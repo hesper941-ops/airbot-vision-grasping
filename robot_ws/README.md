@@ -47,6 +47,7 @@ ros2 launch robot_bringup open_loop_grasp.launch.py
 
 ```bash
 source /opt/ros/humble/setup.bash
+source /home/sunrise/robot/Orbbec_ws/install/setup.bash
 source /home/sunrise/robot/robot_ws/install/setup.bash
 python3 /home/sunrise/robot/hand_to_eye/camera_to_base_transform.py
 ```
@@ -133,6 +134,8 @@ RECOVER -> clear_error (周期重发) -> open gripper -> vertical lift -> move s
 - `freeze_target_before_close`（默认 `true`）：夹爪闭合前冻结 `active_target_base`，避免闭合瞬间目标坐标跳动。
 
 ## 抓取方向与桌面安全约束
+
+**抓取策略概要：** 当前默认采用 `top_down` 上方抓取，禁止从物块下方靠近。视觉可见时持续更新目标坐标；目标短暂丢失时使用 `last_seen_target_base` 继续执行；如果 last-seen 超时（`last_seen_target_max_age_sec`）或路径低于桌面安全高度，状态机进入 `RECOVER`，避免盲抓或碰撞桌面。
 
 当前默认采用 `top_down` 上方抓取。机械臂靠近物块时，只允许从上方或前方靠近；禁止从物块下方或低于桌面安全高度的路径靠近，以避免打到桌子。
 

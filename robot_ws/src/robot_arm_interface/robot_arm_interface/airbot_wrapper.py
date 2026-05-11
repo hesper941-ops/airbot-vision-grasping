@@ -324,7 +324,7 @@ class AirbotWrapper:
         if any(token in lower_output for token in self.FAILURE_TEXT):
             raise RuntimeError(f"SDK call {name} reported failure: {output}")
 
-        if result is False or result is None:
+        if result is False:
             detail = f"; sdk output: {output}" if output else ""
             raise RuntimeError(
                 f"SDK call {name} failed: returned {result!r}{detail}")
