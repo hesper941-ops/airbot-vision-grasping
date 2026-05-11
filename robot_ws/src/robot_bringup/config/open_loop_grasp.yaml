@@ -62,7 +62,9 @@ grasp_task_open_loop:
     max_target_z_jump_m: 0.08
     j6_home_deg: 90.0
     j6_allowed_delta_deg: 90.0
-    j6_preferred_offsets_deg: [0.0, 90.0, -90.0]
+    # Grasp orientation candidates only: J6 must rotate home +/- 90 deg for grasp.
+    # J6 home is reserved for init/recover, not for grasp approach.
+    j6_preferred_offsets_deg: [90.0, -90.0]
     forbid_camera_upside_down: true
     return_j6_to_home_on_recover: true
 
