@@ -54,6 +54,16 @@ source /home/sunrise/robot/robot_ws/install/setup.bash
 python3 /home/sunrise/robot/hand_to_eye/camera_to_base_transform.py
 ```
 
+## AIRBOT server 检查
+
+启动 `open_loop_grasp.launch.py` 前，必须先确认 `airbot_server` 监听 50001：
+
+```bash
+sudo ss -lntp | grep 50001
+```
+
+如果没有 `LISTEN`，不要启动 `open_loop_grasp.launch.py`，因为 `arm_executor_node` 会连接失败并报 `Not connected to the server`。
+
 ## Topic
 
 `grasp_task_open_loop` 订阅：
@@ -109,6 +119,12 @@ RECOVER -> clear_error (周期重发) -> open gripper -> vertical lift -> move s
 ```
 
 如果底层 AIRBOT SDK 报 `move group planning PTP failed`、`gRPC error`、`planning failed`、`motion failed` 等运动失败，`airbot_wrapper` 会抛出异常，`arm_executor_node` 发布 `/robot_arm/executor_status=ERROR`。任务层收到 `ERROR` 后进入 `RECOVER`，不会把失败动作标记成 `DONE`。
+
+## 眼在手上抓取策略
+
+当前默认采用 `top_down` 上方抓取。机械臂只允许从物块上方或前方靠近，禁止从物块下方靠近，以避免打到桌面。
+
+分段靠近过程中，如果 `/visual_target_base` 持续更新，`grasp_task_open_loop` 会持续更新 `base_link` 下的 active target。若目标短暂离开相机视野，则使用 `last_seen_target_base` 继续执行。若 `last_seen_target_base` 超过 `last_seen_target_max_age_sec`，或路径低于桌面安全高度，则进入 `RECOVER`。
 
 ## 眼在手上 last-seen fallback 抓取策略
 
