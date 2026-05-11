@@ -8,7 +8,7 @@
 arm_executor_node:
   ros__parameters:
     do_init: true
-    init_joint_pos_deg: [0.0, -45.0, 120.0, -90.0, 90.0, 90.0]
+    init_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 90.0]
 
     # Conservative AIRBOT Play joint limits.
     # Confirm the exact hardware model before widening these values.
