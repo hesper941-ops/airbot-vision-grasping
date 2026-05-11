@@ -180,6 +180,9 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('joint_speed_safe_threshold', 0.1)
         self.declare_parameter('post_joint_rotate_settle_sec', 0.5)
         self.declare_parameter('gripper_settle_sec', 1.0)
+        self.declare_parameter('open_gripper_before_grasp', True)
+        self.declare_parameter('pre_grasp_open_timeout_sec', 4.0)
+        self.declare_parameter('pre_grasp_open_settle_sec', 1.0)
 
         # Cartesian step-by-step: each command limited to this distance.
         # Must be smaller than AirbotWrapper's 0.100 m single-step safety limit.
@@ -337,6 +340,9 @@ class GraspTaskOpenLoop(Node):
             elif self.task_state == 'WAIT_PRE_TARGET':
                 self._handle_wait_pre_target()
 
+            elif self.task_state == 'PRE_OPEN_GRIPPER':
+                self._handle_pre_open_gripper()
+
             elif self.task_state == 'SET_GRIPPER_ORIENTATION':
                 self._handle_set_gripper_orientation()
 
@@ -392,6 +398,48 @@ class GraspTaskOpenLoop(Node):
             self._start_approach_sequence()
             self.get_logger().info(
                 f'Pre target stable: {self._fmt_xyz(self.pre_target)}')
+            self._transition('PRE_OPEN_GRIPPER')
+
+    def _handle_pre_open_gripper(self):
+        """Open gripper before the grasp sequence starts.
+
+        Only triggered when open_gripper_before_grasp=true.  Sends a
+        single 'open' command, waits for executor to finish, then an
+        additional settle period before advancing to SET_GRIPPER_ORIENTATION.
+        """
+        if self._state_elapsed() > self._param_float('pre_grasp_open_timeout_sec'):
+            self.get_logger().error('PRE_OPEN_GRIPPER timeout.')
+            self._enter_recover('PRE_OPEN_GRIPPER timeout')
+            return
+
+        if not bool(self.get_parameter('open_gripper_before_grasp').value):
+            self.get_logger().info(
+                'open_gripper_before_grasp=false; skipping PRE_OPEN_GRIPPER.')
+            self._transition('SET_GRIPPER_ORIENTATION')
+            return
+
+        if self.pending_speed_profile is not None:
+            return
+
+        if not self.state_command_sent:
+            if not self._executor_accepting():
+                return
+            self._publish_gripper_command('open')
+            self.state_command_sent = True
+            self.gripper_settle_start = None
+            self.get_logger().info('Pre-grasp open gripper command sent once.')
+            return
+
+        # Wait for executor to finish the gripper command
+        if not self._executor_accepting():
+            return
+
+        if self.gripper_settle_start is None:
+            self.gripper_settle_start = self._now_sec()
+            self.get_logger().info('Pre-grasp gripper open done; continue to SET_GRIPPER_ORIENTATION.')
+            return
+
+        if self._now_sec() - self.gripper_settle_start >= self._param_float('pre_grasp_open_settle_sec'):
             self._transition('SET_GRIPPER_ORIENTATION')
 
     def _start_approach_sequence(self):

@@ -83,6 +83,9 @@ grasp_task_open_loop:
     joint_speed_safe_threshold: 0.1
     post_joint_rotate_settle_sec: 0.5
     gripper_settle_sec: 1.0
+    open_gripper_before_grasp: true
+    pre_grasp_open_timeout_sec: 4.0
+    pre_grasp_open_settle_sec: 1.0
 
     # Each Cartesian command is limited to this step size.
     # Must be smaller than AirbotWrapper's 0.100 m single-step safety limit.
