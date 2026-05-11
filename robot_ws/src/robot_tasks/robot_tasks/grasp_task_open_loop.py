@@ -51,6 +51,8 @@ class GraspTaskOpenLoop(Node):
         self.approach_failed_modes = set()
         self.approach_retry_count = 0
         self.return_j6_home_sent = False
+        self.grasp_closed = False
+        self.lift_goal: Optional[list] = None
 
         self.state_command_sent = False
         self.stage_motion_started = False
@@ -722,18 +724,29 @@ class GraspTaskOpenLoop(Node):
                 self.get_logger().error('No fresh end_pose for lift target.')
                 self._enter_recover()
                 return
+            self.grasp_closed = True
+            self.lift_goal = self.planner.compute_safe_lift(self.last_end_pose)
+            self.get_logger().info(
+                f'MOVE_LIFT fixed_goal={self._fmt_xyz(self.lift_goal)}')
+            self.get_logger().info(
+                'Grasp closed; keep gripper closed during lift/return.')
             self._transition('MOVE_LIFT')
 
     def _handle_move_lift(self):
+        if self.lift_goal is None:
+            self.get_logger().error('MOVE_LIFT has no frozen lift_goal.')
+            self._enter_post_grasp_recover('MOVE_LIFT missing lift_goal')
+            return
+
         if not self._fresh_end_pose_available():
             if self._state_elapsed() > self._param_float('motion_timeout_sec'):
                 self.get_logger().error('MOVE_LIFT has no fresh end_pose.')
-                self._enter_recover()
+                self._enter_post_grasp_recover('MOVE_LIFT no fresh end_pose')
             return
 
         self._handle_cartesian_motion(
             'MOVE_LIFT',
-            lambda: self.planner.compute_safe_lift(self.last_end_pose),
+            lambda: list(self.lift_goal),
             on_done=self._after_move_lift,
         )
 
@@ -750,7 +763,7 @@ class GraspTaskOpenLoop(Node):
     def _handle_return_init_pose(self):
         if self._state_elapsed() > self._param_float('return_init_timeout_sec'):
             self.get_logger().error('RETURN_INIT_POSE timeout.')
-            self._enter_recover('RETURN_INIT_POSE timeout')
+            self._enter_post_grasp_recover('RETURN_INIT_POSE timeout')
             return
 
         if self.pending_speed_profile is not None:
@@ -785,6 +798,7 @@ class GraspTaskOpenLoop(Node):
 
         if self._now_sec() - self.settle_start_time >= self._param_float('gripper_settle_sec'):
             self.get_logger().info('Return init pose reached; cycle complete.')
+            self.grasp_closed = False
             self._finish_cycle()
 
     def _handle_move_retreat(self):
@@ -798,6 +812,7 @@ class GraspTaskOpenLoop(Node):
     def _handle_recover(self):
         if self._state_elapsed() > self._param_float('recover_timeout_sec'):
             self.get_logger().error('RECOVER timeout; reset state to IDLE after best-effort recovery.')
+            self.grasp_closed = False
             self._reset_cycle()
             self._transition('IDLE')
             return
@@ -810,8 +825,42 @@ class GraspTaskOpenLoop(Node):
                 self.get_logger().warning(
                     'RECOVER: requested executor clear_error '
                     '(repeating every 0.5 s while executor is ERROR).')
+            if self.recover_phase.startswith('KEEP_CLOSED'):
+                return
             return
 
+        # ---- Post-grasp recovery: keep gripper closed ----
+        if self.recover_phase == 'KEEP_CLOSED_CLEAR_ERROR':
+            self.get_logger().warning(
+                'Post-grasp recovery: clear executor error, keep gripper closed.')
+            self.recover_phase = 'KEEP_CLOSED_RETURN_INIT'
+            self._reset_stage_vars()
+            return
+
+        if self.recover_phase == 'KEEP_CLOSED_RETURN_INIT':
+            if self.last_joint_pos is None:
+                self._finish_recover()
+                return
+            if not self.state_command_sent:
+                if not self._executor_accepting():
+                    return
+                init_deg = list(self.get_parameter('final_init_joint_pos_deg').value)
+                init_rad = [math.radians(float(v)) for v in init_deg]
+                self._publish_joint_target(init_rad)
+                self.state_command_sent = True
+                self.get_logger().info(
+                    'Post-grasp recovery: return to init joint pose (gripper stays closed).')
+                return
+            if self.last_joint_vel is None:
+                return
+            max_speed = max(abs(float(v)) for v in self.last_joint_vel)
+            if max_speed > self._param_float('joint_speed_safe_threshold'):
+                return
+            self.get_logger().info(
+                'Post-grasp recovery complete; gripper stayed closed.')
+            self._finish_recover()
+
+        # ---- Normal RECOVER (pre-grasp or gripper not closed) ----
         if self.recover_phase == 'OPEN_GRIPPER':
             if not self.state_command_sent:
                 if not self._executor_accepting():
@@ -1112,7 +1161,10 @@ class GraspTaskOpenLoop(Node):
     def _handle_approach_failure(self, reason: str):
         approach_states = ('MOVE_PRE_GRASP', 'MOVE_GRASP', 'WAIT_GRASP_TARGET')
         if self.task_state not in approach_states:
-            self._enter_recover(reason)
+            if self.grasp_closed:
+                self._enter_post_grasp_recover(reason)
+            else:
+                self._enter_recover(reason)
             return
 
         current = self.current_approach_mode or self.planner.approach_mode
@@ -1163,6 +1215,21 @@ class GraspTaskOpenLoop(Node):
         self.rejected_busy_count = 0
         self._transition('RECOVER')
 
+    def _enter_post_grasp_recover(self, reason: str = ''):
+        if self.task_state == 'RECOVER':
+            return
+        if reason:
+            self.get_logger().error(
+                f'Post-grasp recovery: keep gripper closed. reason={reason}')
+        self.active_motion_goal = None
+        self.lift_goal = None
+        self.target_window.clear()
+        self.recover_phase = 'KEEP_CLOSED_CLEAR_ERROR'
+        self.pending_speed_profile = None
+        self.last_reset_executor_time = None
+        self.rejected_busy_count = 0
+        self._transition('RECOVER')
+
     def _finish_recover(self):
         self.get_logger().info(
             'RECOVER complete; clearing approach state and returning to IDLE.')
@@ -1198,6 +1265,8 @@ class GraspTaskOpenLoop(Node):
         self.approach_failed_modes.clear()
         self.approach_retry_count = 0
         self.return_j6_home_sent = False
+        self.grasp_closed = False
+        self.lift_goal = None
         self._reset_stage_vars()
 
     def _reset_stage_vars(self):
