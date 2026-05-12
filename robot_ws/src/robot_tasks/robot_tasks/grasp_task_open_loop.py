@@ -430,12 +430,27 @@ class GraspTaskOpenLoop(Node):
 
         if self._target_mgr.has_stable_target():
             stable = self._target_mgr.get_stable_target()
+            if stable is None:
+                self.get_logger().warning(
+                    'TargetManager reported stable target, but stable_target is None; '
+                    'stay in WAIT_PRE_TARGET.')
+                return
+            try:
+                self._ctx.fixed_target_snapshot = (
+                    self._target_mgr.make_fixed_snapshot(self._now_sec()))
+            except RuntimeError as exc:
+                self.get_logger().warning(
+                    f'Cannot create fixed target snapshot yet: {exc}; '
+                    'stay in WAIT_PRE_TARGET.')
+                return
+
             self.pre_target = [stable.x, stable.y, stable.z]
             if not self.target_frozen:
                 self.active_target_base = list(self.pre_target)
             self._start_approach_sequence()
             self.get_logger().info(
-                f'Pre target stable: {self._fmt_xyz(self.pre_target)}')
+                f'Pre target stable: {self._fmt_xyz(self.pre_target)}; '
+                f'fixed_target_snapshot={self._fmt_xyz(self._fixed_target_xyz())}')
             self._transition('PRE_OPEN_GRIPPER')
 
     def _handle_pre_open_gripper(self):
@@ -633,10 +648,10 @@ class GraspTaskOpenLoop(Node):
 
     def _after_move_grasp(self):
         if bool(self.get_parameter('freeze_target_before_close').value):
-            target = self._get_active_target_or_last_seen()
+            target = self._get_fixed_snapshot_target()
             if target is None:
                 self.get_logger().error(
-                    'Cannot freeze target before close: no valid active or last-seen base target.')
+                    'Cannot freeze target before close: no fixed target snapshot.')
                 self._enter_recover()
                 return
             self.active_target_base = list(target)
@@ -647,7 +662,7 @@ class GraspTaskOpenLoop(Node):
 
     def _compute_pre_grasp_from_active_target(self):
         self._ensure_approach_mode_started()
-        target = self._get_active_target_or_last_seen()
+        target = self._get_fixed_snapshot_target()
         if target is None:
             return None
         self.pre_target = list(target)
@@ -684,7 +699,7 @@ class GraspTaskOpenLoop(Node):
 
     def _compute_grasp_from_active_target(self):
         self._ensure_approach_mode_started()
-        target = self._get_active_target_or_last_seen()
+        target = self._get_fixed_snapshot_target()
         if target is None:
             return None
         self.grasp_target = list(target)
@@ -748,6 +763,21 @@ class GraspTaskOpenLoop(Node):
         if grasp is not None:
             parts.append(f'grasp={self._fmt_xyz(grasp)}')
         self.get_logger().info(', '.join(parts))
+
+    def _fixed_target_xyz(self):
+        snapshot = self._ctx.fixed_target_snapshot
+        if snapshot is None:
+            return None
+        return [float(snapshot.x), float(snapshot.y), float(snapshot.z)]
+
+    def _get_fixed_snapshot_target(self):
+        target = self._fixed_target_xyz()
+        if target is None:
+            self.last_target_failure_reason = 'fixed_target_snapshot missing'
+            self.get_logger().warning(
+                'No fixed_target_snapshot available; motion stage cannot compute goal.')
+            return None
+        return target
 
     def _get_active_target_or_last_seen(self):
         now = self._now_sec()
@@ -1307,6 +1337,7 @@ class GraspTaskOpenLoop(Node):
         self.grasp_closed = False
         self.lift_goal = None
         self.recover_lift_goal = None
+        self._ctx.fixed_target_snapshot = None
         self._reset_stage_vars()
 
     def _reset_stage_vars(self):

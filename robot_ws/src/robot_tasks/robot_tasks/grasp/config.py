@@ -228,7 +228,7 @@ class GraspTaskConfig:
             use_last_seen_target_on_loss=_pb("use_last_seen_target_on_loss", True),
             visual_lost_grace_sec=_pf("visual_lost_grace_sec", 0.5),
             last_seen_target_max_age_sec=_pf("last_seen_target_max_age_sec", 8.0),
-            update_target_during_motion=_pb("update_target_during_motion", True),
+            update_target_during_motion=_pb("update_target_during_motion", False),
             freeze_target_before_close=_pb("freeze_target_before_close", True),
             require_second_visual_confirm=_pb("require_second_visual_confirm", False),
             continue_with_last_seen_during_motion=_pb("continue_with_last_seen_during_motion", True),
