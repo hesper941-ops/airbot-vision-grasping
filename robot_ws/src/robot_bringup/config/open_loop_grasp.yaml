@@ -1,46 +1,62 @@
-# 开环抓取参数配置。
+# ======================================================================
+# AIRBOT Vision Grasping - Open Loop Grasp Config
 #
-# 默认数据流：
-#   Orbbec_ws 直接发布 base_link 坐标系下的 /visual_target_base。
-#   robot_tasks/grasp_task_open_loop 消费该目标，并向
-#   robot_arm_driver/arm_executor_node 下发机械臂命令。
+# Main data flow:
+#   detector nodes
+#       -> /duck_position, /green_box_position, /apple_position, ...
+#   transform / target manager
+#       -> base-frame target
+#   grasp_task_open_loop
+#       -> /robot_arm/cart_target
+#       -> /robot_arm/target_joint
+#       -> /robot_arm/gripper_cmd
+#       -> /robot_arm/speed_profile
+#       -> /robot_arm/reset_executor
+#   arm_executor_node (唯一 AIRBOT SDK owner)
+#       -> AIRBOT SDK
+# ======================================================================
 
+
+# ======================================================================
+# [1] ARM EXECUTOR NODE
+#     arm_executor_node — 唯一直接调用 AIRBOT SDK 的节点
+# ======================================================================
 arm_executor_node:
   ros__parameters:
+
+    # ------------------------------------------------------------------
+    # [1.1] SDK 初始化
+    # ------------------------------------------------------------------
     do_init: true
+
+    # 初始关节位姿 (degree).
     init_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 90.0]
 
-    # Joint limits aligned with ArmSafetyConfig defaults in airbot_wrapper.py.
+    # ------------------------------------------------------------------
+    # [1.2] 关节限位 (rad)
+    # 与 airbot_wrapper.py ArmSafetyConfig 默认值一致
+    # ------------------------------------------------------------------
     joint_min_rad: [-3.1416, -2.6000, -2.6000, -3.1416, -2.6000, -3.1416]
     joint_max_rad: [ 3.1416,  2.6000,  2.6000,  3.1416,  2.6000,  3.1416]
 
+
+# ======================================================================
+# [2] GRASP TASK OPEN LOOP
+#     grasp_task_open_loop — 抓取状态机任务节点
+# ======================================================================
 grasp_task_open_loop:
   ros__parameters:
+
+    # ==================================================================
+    # [2.1] Frames
+    # ==================================================================
     base_frame: base_link
     allow_empty_target_frame: false
 
-    approach_mode: "front"
-    approach_priority: ["front", "top_down"]
-    front_first_then_top_down: true
-    max_approach_mode_retries: 1
-    continue_with_last_seen_during_motion: true
-    table_z: 0.0
-    table_clearance: 0.04
-    final_grasp_clearance: 0.015
-    pre_grasp_z_offset: 0.14
-    grasp_z_offset: 0.02
-    lift_z_offset: 0.12
-    min_safe_motion_z: 0.08
-    reject_target_below_table: true
-    front_approach_x_offset: -0.10
-    front_approach_z_offset: 0.05
-    safe_pose: [0.35, 0.0, 0.35]
-    joint6_compensation_deg: 90.0
-    # Conservative J6 range based on AIRBOT Play official specs.
-    # Confirm exact hardware model before widening this range.
-    joint6_min_rad: -2.9671
-    joint6_max_rad: 2.9671
-
+    # ==================================================================
+    # [2.2] Target stability (目标稳定性)
+    # Unit: meter / second.
+    # ==================================================================
     confidence_threshold: 0.7
     stable_frame_count: 5
     stable_frame_count_required: 5
@@ -48,26 +64,70 @@ grasp_task_open_loop:
     stable_position_threshold_m: 0.015
     stable_depth_threshold_m: 0.03
     target_timeout_sec: 1.0
-    end_pose_timeout_sec: 1.0
+
+    # 单帧跳变大于此阈值则拒绝该帧并重置稳定计数 (meter).
+    max_target_jump_m: 0.08
+    max_target_z_jump_m: 0.08
+
+    # ==================================================================
+    # [2.3] Last-seen target fallback (视觉丢失 fallback)
+    # Unit: second.
+    # ==================================================================
     use_last_seen_target_on_loss: true
     visual_lost_grace_sec: 0.5
     last_seen_target_max_age_sec: 8.0
     update_target_during_motion: true
     freeze_target_before_close: true
     require_second_visual_confirm: false
-    max_target_jump_m: 0.08
-    max_target_z_jump_m: 0.08
+    continue_with_last_seen_during_motion: true
+
+    # ==================================================================
+    # [2.4] Approach planning (抓取方向规划)
+    # Unit: meter.
+    # ==================================================================
+    approach_mode: "front"
+    approach_priority: ["front", "top_down"]
+    front_first_then_top_down: true
+    max_approach_mode_retries: 1
+
+    # 预抓取 / 抓取 / 抬升 / 前方靠近偏移量 (meter).
+    pre_grasp_z_offset: 0.14
+    grasp_z_offset: 0.02
+    lift_z_offset: 0.12
+    front_approach_x_offset: -0.10
+    front_approach_z_offset: 0.05
+
+    # ==================================================================
+    # [2.5] J6 end-effector orientation (末端夹爪方向)
+    # 抓取前 J6 必须从 home 旋转 ±90°, 不允许停留在 home.
+    # J6 home 仅用于 init/recover, 不用作抓取姿态.
+    # Unit: degree / rad.
+    # ==================================================================
+    joint6_compensation_deg: 90.0
+
+    joint6_min_rad: -2.9671
+    joint6_max_rad: 2.9671
+
     j6_home_deg: 90.0
     j6_allowed_delta_deg: 90.0
-    # Grasp orientation candidates only: J6 must rotate home +/- 90 deg for grasp.
-    # J6 home is reserved for init/recover, not for grasp approach.
+
+    # 抓取前只允许 home ± 这些 offset.
+    # 0° offset 被排除 —— 抓取姿态必须旋转 ±90°.
     j6_preferred_offsets_deg: [90.0, -90.0]
+
     forbid_camera_upside_down: true
     return_j6_to_home_on_recover: true
-    return_to_init_after_grasp: true
-    keep_gripper_closed_after_grasp: true
-    final_init_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 90.0]
-    return_init_timeout_sec: 10.0
+
+    # ==================================================================
+    # [2.6] Table & workspace safety (桌面与工作空间安全)
+    # Unit: meter.
+    # ==================================================================
+    table_z: 0.0
+    table_clearance: 0.04
+    final_grasp_clearance: 0.015
+    min_safe_motion_z: 0.08
+    reject_target_below_table: true
+    safe_pose: [0.35, 0.0, 0.35]
 
     workspace_limits:
       x_min: 0.10
@@ -77,25 +137,148 @@ grasp_task_open_loop:
       z_min: 0.02
       z_max: 0.70
 
+    # ==================================================================
+    # [2.7] Gripper policy (夹爪策略)
+    # ==================================================================
+    open_gripper_before_grasp: true
+    pre_grasp_open_timeout_sec: 4.0
+    pre_grasp_open_settle_sec: 1.0
+    gripper_settle_sec: 1.0
+
+    # 抓取后保持夹爪闭合并返回初始位姿.
+    return_to_init_after_grasp: true
+    keep_gripper_closed_after_grasp: true
+
+    # 抓取后回初始关节位姿 (degree).
+    final_init_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 90.0]
+    return_init_timeout_sec: 10.0
+
+    # ==================================================================
+    # [2.8] Motion control (运动控制)
+    # Unit: meter / second.
+    # ==================================================================
+    # 单步最大步长, 必须小于 AirbotWrapper 的 0.100 m 限制.
+    max_cartesian_step: 0.08
     position_tolerance: 0.02
     position_tolerance_m: 0.02
     settle_time_sec: 0.5
     joint_speed_safe_threshold: 0.1
     post_joint_rotate_settle_sec: 0.5
-    gripper_settle_sec: 1.0
-    open_gripper_before_grasp: true
-    pre_grasp_open_timeout_sec: 4.0
-    pre_grasp_open_settle_sec: 1.0
+    end_pose_timeout_sec: 1.0
 
-    # Each Cartesian command is limited to this step size.
-    # Must be smaller than AirbotWrapper's 0.100 m single-step safety limit.
-    max_cartesian_step: 0.08
-
+    # ==================================================================
+    # [2.9] Motion timeouts (各阶段超时)
+    # Unit: second.
+    # ==================================================================
     wait_pre_target_warn_sec: 15.0
     wait_grasp_target_timeout_sec: 8.0
     motion_timeout_sec: 12.0
     set_orientation_timeout_sec: 8.0
     close_gripper_timeout_sec: 4.0
     recover_timeout_sec: 15.0
+
+    # ==================================================================
+    # [2.10] Recovery policy (恢复策略)
+    # Unit: second.
+    # ==================================================================
     rejected_busy_recover_threshold: 2
+    recover_clear_error_interval_sec: 0.5
+    recover_return_init_pose: true
+
+    # ==================================================================
+    # [2.11] Active search / viewpoint search (主动搜索目标)
+    # 当 detector 检测不到目标时, 机械臂通过改变观察姿态来寻找.
+    # SEARCH_TARGET 不是 RECOVER.
+    # RECOVER 负责错误恢复; SEARCH_TARGET 负责目标不可见时主动观察.
+    # ==================================================================
+    active_search:
+      enabled: true
+
+      # WAIT_TARGET 等待多久后进入 SEARCH_TARGET (second).
+      target_acquire_timeout_sec: 3.0
+
+      # 持续收到目标但不稳定超过此时间则进入搜索 (second).
+      unstable_target_timeout_sec: 5.0
+
+      # 单次搜索最大时长 (second).
+      search_timeout_sec: 25.0
+
+      # 搜索姿态最大循环次数.
+      search_max_cycles: 2
+
+      # 搜索运动速度比例, 必须低于正常抓取速度.
+      search_speed_scale: 0.3
+
+      # 搜索失败后是否返回默认观察位.
+      return_to_default_pose_on_fail: true
+
+      default_search_pose_name: "observe_center"
+
+    # ==================================================================
+    # [2.12] Search poses (搜索姿态)
+    # 所有 joint_pos 使用 rad.
+    # 以下姿态值仅为占位示例, 真实部署前必须根据 AIRBOT 实物姿态、
+    # 关节限制、桌面高度和相机视野重新确认.
+    # ==================================================================
+    search_poses:
+      - name: "observe_center"
+        joint_pos: [0.0, -0.65, 1.20, 0.0, 1.20, 0.0]
+        speed_scale: 0.3
+        settle_time_sec: 0.5
+        detect_window_sec: 1.0
+
+      - name: "observe_left"
+        joint_pos: [0.35, -0.65, 1.20, 0.0, 1.20, 0.0]
+        speed_scale: 0.3
+        settle_time_sec: 0.5
+        detect_window_sec: 1.0
+
+      - name: "observe_right"
+        joint_pos: [-0.35, -0.65, 1.20, 0.0, 1.20, 0.0]
+        speed_scale: 0.3
+        settle_time_sec: 0.5
+        detect_window_sec: 1.0
+
+      - name: "observe_low"
+        joint_pos: [0.0, -0.85, 1.35, 0.0, 1.35, 0.0]
+        speed_scale: 0.25
+        settle_time_sec: 0.7
+        detect_window_sec: 1.0
+
+      - name: "observe_high"
+        joint_pos: [0.0, -0.45, 1.05, 0.0, 1.05, 0.0]
+        speed_scale: 0.25
+        settle_time_sec: 0.7
+        detect_window_sec: 1.0
+
+    # ==================================================================
+    # [2.13] Target types (目标类型配置)
+    # 后续新增目标类型时只需在这里添加配置和对应 detector topic,
+    # 不需要大改抓取状态机.
+    # ==================================================================
+    target_types:
+      duck:
+        input_topic: "/duck_position"
+        frame_id: "camera_color_optical_frame"
+        stable_required_count: 5
+        stable_position_tolerance_m: 0.015
+        target_timeout_sec: 1.0
+
+      green_box:
+        input_topic: "/green_box_position"
+        frame_id: "camera_color_optical_frame"
+        stable_required_count: 5
+        stable_position_tolerance_m: 0.015
+        target_timeout_sec: 1.0
+
+      apple:
+        input_topic: "/apple_position"
+        frame_id: "camera_color_optical_frame"
+        stable_required_count: 5
+        stable_position_tolerance_m: 0.015
+        target_timeout_sec: 1.0
+
+    # ==================================================================
+    # [2.14] Main loop
+    # ==================================================================
     loop_hz: 4.0

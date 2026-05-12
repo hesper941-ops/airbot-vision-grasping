@@ -21,6 +21,17 @@ from std_msgs.msg import Float64MultiArray, String
 from robot_msgs.msg import ArmJointState, VisualTarget
 from robot_tasks.shared.grasp_planner import GraspPlanner
 
+# 重构模块（逐步迁移中）
+from robot_tasks.grasp.config import GraspTaskConfig
+from robot_tasks.grasp.context import GraspContext
+from robot_tasks.grasp.command_port import ArmCommandPort
+from robot_tasks.grasp.target_manager import TargetManager
+from robot_tasks.grasp.target_source_manager import TargetSourceManager
+from robot_tasks.grasp.search_pose_manager import SearchPoseManager, SearchPose
+from robot_tasks.grasp.search_strategy import SearchStrategy
+from robot_tasks.grasp.recovery import RecoveryManager
+from robot_tasks.grasp.grasp_sequence import GraspSequenceController
+
 
 class GraspTaskOpenLoop(Node):
     """Two-stage visual-confirmed open-loop grasp state machine."""
@@ -29,7 +40,35 @@ class GraspTaskOpenLoop(Node):
         super().__init__('grasp_task_open_loop')
         self._declare_parameters()
 
+        # ---- 重构模块初始化（与现有逻辑共存） ----
+        self._cfg = GraspTaskConfig.from_ros_node(self)
+        self._ctx = GraspContext()
+        self._cmd_port = ArmCommandPort(self, base_frame=self._cfg.base_frame)
+        self._target_mgr = TargetManager(self._cfg)
+        self._target_src = TargetSourceManager(self._cfg)
+        self._search_poses = [
+            SearchPose(**p) if isinstance(p, dict) else p
+            for p in self._cfg.search_poses
+        ]
+        self._search_pose_mgr = SearchPoseManager(
+            self._search_poses, self._cfg.active_search.search_max_cycles)
+        self._search_strategy = SearchStrategy(
+            self._cfg, self._cmd_port, self._target_mgr, self._search_pose_mgr)
+        self._recovery_mgr = RecoveryManager(self._cfg, self._cmd_port)
+        self._controller = GraspSequenceController(
+            config=self._cfg,
+            context=self._ctx,
+            target_manager=self._target_mgr,
+            target_source_manager=self._target_src,
+            command_port=self._cmd_port,
+            search_strategy=self._search_strategy,
+            recovery=self._recovery_mgr,
+            planner=None,  # planner 将在 _config_dict() 之后更新
+        )
+
+        # ---- 现有逻辑（保持运行中） ----
         self.planner = GraspPlanner(self._config_dict())
+        self._controller._planner = self.planner  # 同步到 controller
 
         self.task_state = 'IDLE'
         self.state_start_time = self._now_sec()
