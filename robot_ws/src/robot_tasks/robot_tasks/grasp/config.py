@@ -44,7 +44,7 @@ class SearchPoseConfig:
 
 @dataclass
 class ActiveSearchConfig:
-    enabled: bool = True
+    enabled: bool = False
     target_acquire_timeout_sec: float = 3.0
     unstable_target_timeout_sec: float = 5.0
     search_timeout_sec: float = 25.0
@@ -201,7 +201,7 @@ class GraspTaskConfig:
 
         # -- Active search sub-struct ------------------------------------
         asc = ActiveSearchConfig(
-            enabled=_pb("active_search.enabled", True),
+            enabled=_pb("active_search.enabled", False),
             target_acquire_timeout_sec=_pf("active_search.target_acquire_timeout_sec", 3.0),
             unstable_target_timeout_sec=_pf("active_search.unstable_target_timeout_sec", 5.0),
             search_timeout_sec=_pf("active_search.search_timeout_sec", 25.0),
