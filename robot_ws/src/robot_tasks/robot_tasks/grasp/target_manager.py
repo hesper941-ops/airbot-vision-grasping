@@ -1,7 +1,6 @@
 """目标管理器：负责目标合法性检查、稳定判断、跳变拒绝、last-seen fallback 和目标冻结。"""
 
 import math
-import statistics
 from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional
@@ -26,7 +25,12 @@ class TargetObservation:
 
 @dataclass(frozen=True)
 class FixedTargetSnapshot:
-    """冻结的目标快照，运动阶段开始后不再受视觉更新影响。"""
+    """冻结的目标快照，运动阶段开始后不再受视觉更新影响。
+
+    注意：
+    固定快照只能来自 stable_target。
+    不能从 latest_observation 或 last_seen 创建。
+    """
     x: float
     y: float
     z: float
@@ -56,13 +60,11 @@ class TargetManager:
         # 最后一次看到的有效目标
         self.last_seen: Optional[TargetObservation] = None
         self.last_seen_time_sec: Optional[float] = None
-        # 当前活跃的运动目标（可能等于 latest / stable / last_seen）
-        self.active_target: Optional[TargetObservation] = None
         # 是否已冻结
         self.frozen: bool = False
 
-        # 稳定性窗口
-        self._window = deque(
+        # 稳定性窗口，保存 TargetObservation 对象
+        self._window: deque = deque(
             maxlen=max(1, config.stable_frame_count_required))
 
     # ------------------------------------------------------------------
@@ -74,29 +76,37 @@ class TargetManager:
         active_target: Optional[list] = None,
         task_state: str = "",
     ) -> bool:
-        """处理一帧新观测。返回 True 表示帧被接受并更新了内部状态。"""
-        # 合法性
+        """接收一帧目标观测。返回 True 表示帧被接受。
+
+        如果目标合法则更新 latest_observation 和 last_seen；
+        如果窗口稳定则更新 stable_target。
+        """
+        # 合法性检查
         if not self._is_valid(obs):
             self.reset_stability()
             return False
 
         # 跳变拒绝
         if self._is_large_jump(obs, active_target, task_state):
-            self.reset_stability()
             self.latest_observation = obs
             self.last_seen = obs
             self.last_seen_time_sec = now_sec
+            self.reset_stability()
             return False
 
         self.latest_observation = obs
         self.last_seen = obs
         self.last_seen_time_sec = now_sec
 
-        # 稳定窗口更新
-        self._window.append({
-            "x": obs.x, "y": obs.y, "z": obs.z,
-            "depth": obs.depth, "confidence": obs.confidence,
-        })
+        # 将 TargetObservation 对象加入窗口
+        self._window.append(obs)
+
+        # 窗口满且位置 / 深度稳定时更新 stable_target
+        if self.is_stable():
+            self.stable_target = self._median_observation()
+        else:
+            self.stable_target = None
+
         return True
 
     # ------------------------------------------------------------------
@@ -112,37 +122,67 @@ class TargetManager:
         median_xyz = self._stable_median()
         max_dist = max(
             math.hypot(
-                e["x"] - median_xyz[0],
-                e["y"] - median_xyz[1],
-                e["z"] - median_xyz[2],
+                obs.x - median_xyz[0],
+                obs.y - median_xyz[1],
+                obs.z - median_xyz[2],
             )
-            for e in self._window
+            for obs in self._window
         )
 
-        depth_vals = [e["depth"] for e in self._window if math.isfinite(e["depth"])]
+        depth_vals = [obs.depth for obs in self._window
+                      if math.isfinite(obs.depth)]
         max_depth_delta = 0.0
         if depth_vals:
-            med_depth = statistics.median(depth_vals)
+            med_depth = sorted(depth_vals)[len(depth_vals) // 2]
             max_depth_delta = max(abs(d - med_depth) for d in depth_vals)
 
         ok_pos = max_dist <= self._config.stable_position_threshold_m
         ok_depth = max_depth_delta <= self._config.stable_depth_threshold_m
         return ok_pos and ok_depth
 
+    def has_stable_target(self) -> bool:
+        """是否有当前稳定目标。"""
+        return self.stable_target is not None
+
     def get_stable_target(self) -> Optional[TargetObservation]:
-        """返回当前稳定目标的 median 坐标。"""
-        if not self.is_stable():
-            return None
-        median_xyz = self._stable_median()
-        ref = self._window[-1]
-        return TargetObservation(
-            x=median_xyz[0], y=median_xyz[1], z=median_xyz[2],
-            depth=ref.get("depth", 0.0),
-            confidence=ref.get("confidence", self._config.confidence_threshold),
-            frame_id=(self.latest_observation.frame_id if self.latest_observation else ""),
-            stamp_sec=(self.latest_observation.stamp_sec if self.latest_observation else 0.0),
-            object_name=(self.latest_observation.object_name if self.latest_observation else ""),
+        """返回当前稳定目标。"""
+        return self.stable_target
+
+    # ------------------------------------------------------------------
+    # 目标冻结
+    # ------------------------------------------------------------------
+
+    def make_fixed_snapshot(self, now_sec: float) -> FixedTargetSnapshot:
+        """基于稳定目标创建固定快照。
+
+        注意：
+        固定快照只能来自 stable_target。
+        不能从 latest_observation 或 last_seen 创建。
+        如果 stable_target 为 None 则抛出 RuntimeError。
+        """
+        if self.stable_target is None:
+            raise RuntimeError(
+                "无法创建固定目标快照：当前没有 stable_target。"
+                "请先通过 has_stable_target() 确认。"
+            )
+
+        src = self.stable_target
+        return FixedTargetSnapshot(
+            x=src.x,
+            y=src.y,
+            z=src.z,
+            frame_id=src.frame_id,
+            source_stamp_sec=src.stamp_sec,
+            object_name=src.object_name,
+            snapshot_stamp_sec=now_sec,
         )
+
+    def freeze(self):
+        """冻结目标，后续不再更新 active_target。"""
+        self.frozen = True
+
+    def unfreeze(self):
+        self.frozen = False
 
     # ------------------------------------------------------------------
     # Last-seen fallback
@@ -168,13 +208,11 @@ class TargetManager:
         if age > max_age:
             return None
 
-        use_last_seen = (
-            self._config.use_last_seen_target_on_loss
-        )
+        use_last_seen = bool(self._config.use_last_seen_target_on_loss)
         if task_state in ("MOVE_PRE_GRASP", "MOVE_GRASP", "MOVE_LIFT"):
             use_last_seen = (
                 use_last_seen
-                and self._config.continue_with_last_seen_during_motion
+                and bool(self._config.continue_with_last_seen_during_motion)
             )
 
         if current_active is not None and not is_frozen:
@@ -190,35 +228,11 @@ class TargetManager:
         return [self.last_seen.x, self.last_seen.y, self.last_seen.z]
 
     # ------------------------------------------------------------------
-    # 目标冻结
-    # ------------------------------------------------------------------
-
-    def make_fixed_snapshot(self, now_sec: float) -> Optional[FixedTargetSnapshot]:
-        """基于当前最新有效目标创建冻结快照。"""
-        src = self.stable_target or self.latest_observation or self.last_seen
-        if src is None:
-            return None
-        return FixedTargetSnapshot(
-            x=src.x, y=src.y, z=src.z,
-            frame_id=src.frame_id,
-            source_stamp_sec=src.stamp_sec,
-            object_name=src.object_name,
-            snapshot_stamp_sec=now_sec,
-        )
-
-    def freeze(self):
-        """冻结目标，后续不再更新 active_target。"""
-        self.frozen = True
-
-    def unfreeze(self):
-        self.frozen = False
-
-    # ------------------------------------------------------------------
     # 重置
     # ------------------------------------------------------------------
 
     def reset_stability(self):
-        """清空稳定窗口。"""
+        """清空稳定窗口与 stable_target。"""
         self._window.clear()
         self.stable_target = None
 
@@ -228,9 +242,18 @@ class TargetManager:
         self.stable_target = None
         self.last_seen = None
         self.last_seen_time_sec = None
-        self.active_target = None
         self.frozen = False
         self._window.clear()
+
+    # ------------------------------------------------------------------
+    # 查询
+    # ------------------------------------------------------------------
+
+    def last_seen_age_sec(self, now_sec: float) -> Optional[float]:
+        """返回 last_seen 的年龄（秒）。"""
+        if self.last_seen_time_sec is None:
+            return None
+        return now_sec - self.last_seen_time_sec
 
     # ------------------------------------------------------------------
     # 内部
@@ -241,7 +264,8 @@ class TargetManager:
             return False
         if not self._in_workspace([obs.x, obs.y, obs.z]):
             return False
-        if math.isfinite(obs.confidence) and obs.confidence < self._config.confidence_threshold:
+        if math.isfinite(obs.confidence) and \
+           obs.confidence < self._config.confidence_threshold:
             return False
         return True
 
@@ -273,13 +297,28 @@ class TargetManager:
         )
 
     def _stable_median(self) -> List[float]:
-        return [
-            statistics.median(e["x"] for e in self._window),
-            statistics.median(e["y"] for e in self._window),
-            statistics.median(e["z"] for e in self._window),
-        ]
+        """计算窗口内位置的中位数。"""
+        xs = sorted(obs.x for obs in self._window)
+        ys = sorted(obs.y for obs in self._window)
+        zs = sorted(obs.z for obs in self._window)
+        mid = len(self._window) // 2
+        return [xs[mid], ys[mid], zs[mid]]
 
-    def last_seen_age_sec(self, now_sec: float) -> Optional[float]:
-        if self.last_seen_time_sec is None:
-            return None
-        return now_sec - self.last_seen_time_sec
+    def _median_observation(self) -> TargetObservation:
+        """用窗口中位数构造 TargetObservation。"""
+        median_xyz = self._stable_median()
+        depths = sorted(obs.depth for obs in self._window)
+        confs = sorted(obs.confidence for obs in self._window)
+        mid = len(self._window) // 2
+        ref = self._window[-1]
+
+        return TargetObservation(
+            x=median_xyz[0],
+            y=median_xyz[1],
+            z=median_xyz[2],
+            depth=depths[mid],
+            confidence=confs[mid],
+            frame_id=ref.frame_id,
+            stamp_sec=ref.stamp_sec,
+            object_name=ref.object_name,
+        )

@@ -7,9 +7,7 @@ explicit joint/cartesian/gripper/speed commands to arm_executor_node. It does
 not call the AIRBOT SDK and does not perform camera-to-base transforms.
 """
 
-from collections import deque
 import math
-import statistics
 from typing import Optional
 
 import rclpy
@@ -21,16 +19,17 @@ from std_msgs.msg import Float64MultiArray, String
 from robot_msgs.msg import ArmJointState, VisualTarget
 from robot_tasks.shared.grasp_planner import GraspPlanner
 
-# 重构模块（逐步迁移中）
+# 重构模块（已稳定，逐步接入中）
 from robot_tasks.grasp.config import GraspTaskConfig
 from robot_tasks.grasp.context import GraspContext
 from robot_tasks.grasp.command_port import ArmCommandPort
-from robot_tasks.grasp.target_manager import TargetManager
-from robot_tasks.grasp.target_source_manager import TargetSourceManager
-from robot_tasks.grasp.search_pose_manager import SearchPoseManager, SearchPose
-from robot_tasks.grasp.search_strategy import SearchStrategy
-from robot_tasks.grasp.recovery import RecoveryManager
-from robot_tasks.grasp.grasp_sequence import GraspSequenceController
+from robot_tasks.grasp.target_manager import TargetManager, TargetObservation
+# 后续模块暂不接入，保持隔离:
+# from robot_tasks.grasp.target_source_manager import TargetSourceManager
+# from robot_tasks.grasp.search_pose_manager import SearchPoseManager
+# from robot_tasks.grasp.search_strategy import SearchStrategy
+# from robot_tasks.grasp.recovery import RecoveryManager
+# from robot_tasks.grasp.grasp_sequence import GraspSequenceController
 
 
 class GraspTaskOpenLoop(Node):
@@ -40,35 +39,15 @@ class GraspTaskOpenLoop(Node):
         super().__init__('grasp_task_open_loop')
         self._declare_parameters()
 
-        # ---- 重构模块初始化（与现有逻辑共存） ----
+        # ---- 已稳定的重构模块（与旧逻辑共存） ----
         self._cfg = GraspTaskConfig.from_ros_node(self)
         self._ctx = GraspContext()
         self._cmd_port = ArmCommandPort(self, base_frame=self._cfg.base_frame)
         self._target_mgr = TargetManager(self._cfg)
-        self._target_src = TargetSourceManager(self._cfg)
-        self._search_poses = [
-            SearchPose(**p) if isinstance(p, dict) else p
-            for p in self._cfg.search_poses
-        ]
-        self._search_pose_mgr = SearchPoseManager(
-            self._search_poses, self._cfg.active_search.search_max_cycles)
-        self._search_strategy = SearchStrategy(
-            self._cfg, self._cmd_port, self._target_mgr, self._search_pose_mgr)
-        self._recovery_mgr = RecoveryManager(self._cfg, self._cmd_port)
-        self._controller = GraspSequenceController(
-            config=self._cfg,
-            context=self._ctx,
-            target_manager=self._target_mgr,
-            target_source_manager=self._target_src,
-            command_port=self._cmd_port,
-            search_strategy=self._search_strategy,
-            recovery=self._recovery_mgr,
-            planner=None,  # planner 将在 _config_dict() 之后更新
-        )
+        # 后续模块（target_source / search / recovery / grasp_sequence）暂不接入
 
-        # ---- 现有逻辑（保持运行中） ----
+        # ---- 旧逻辑（当前主运行路径） ----
         self.planner = GraspPlanner(self._config_dict())
-        self._controller._planner = self.planner  # 同步到 controller
 
         self.task_state = 'IDLE'
         self.state_start_time = self._now_sec()
@@ -82,7 +61,6 @@ class GraspTaskOpenLoop(Node):
         self.active_target_base = None
         self.target_frozen = False
         self.active_motion_goal: Optional[list] = None
-        self.target_window = deque(maxlen=self._stable_frame_count_required())
         self.last_visual_lost_warning_time: Optional[float] = None
         self.last_target_failure_reason = None
         self.current_approach_index = 0
@@ -137,16 +115,8 @@ class GraspTaskOpenLoop(Node):
             10,
         )
 
-        self.cart_pub = self.create_publisher(
-            PointStamped, '/robot_arm/cart_target', 10)
-        self.joint_pub = self.create_publisher(
-            Float64MultiArray, '/robot_arm/target_joint', 10)
-        self.gripper_pub = self.create_publisher(
-            String, '/robot_arm/gripper_cmd', 10)
-        self.speed_pub = self.create_publisher(
-            String, '/robot_arm/speed_profile', 10)
-        self.reset_executor_pub = self.create_publisher(
-            String, '/robot_arm/reset_executor', 10)
+        # 机械臂命令发布统一通过 ArmCommandPort，不再直接创建 publisher
+        # 所有消息保持与原有 topic 和类型一致
 
         self.timer = self.create_timer(
             1.0 / float(self.get_parameter('loop_hz').value),
@@ -202,7 +172,7 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('use_last_seen_target_on_loss', True)
         self.declare_parameter('visual_lost_grace_sec', 0.5)
         self.declare_parameter('last_seen_target_max_age_sec', 5.0)
-        self.declare_parameter('update_target_during_motion', True)
+        self.declare_parameter('update_target_during_motion', False)
         self.declare_parameter('freeze_target_before_close', True)
         self.declare_parameter('require_second_visual_confirm', False)
         self.declare_parameter('max_target_jump_m', 0.08)
@@ -271,42 +241,64 @@ class GraspTaskOpenLoop(Node):
         }
 
     def target_callback(self, msg: VisualTarget):
-        if not self._valid_target(msg):
-            return
+        """接收视觉目标，经 TargetManager 判断稳定性后更新上下文。"""
+        now_sec = self._now_sec()
 
+        # 兼容旧字段赋值
         self.latest_target = msg
-        self.latest_target_time = self._now_sec()
-        target_base = [float(msg.x), float(msg.y), float(msg.z)]
+        self.latest_target_time = now_sec
 
-        if self._reject_target_jump(target_base):
+        obs = TargetObservation(
+            x=float(msg.x),
+            y=float(msg.y),
+            z=float(msg.z),
+            depth=float(getattr(msg, "depth", 0.0)),
+            confidence=float(getattr(msg, "confidence", 0.85)),
+            frame_id=str(getattr(msg.header, "frame_id", "")),
+            stamp_sec=now_sec,
+            object_name=str(getattr(msg, "object_name", "duck")),
+        )
+
+        accepted = self._target_mgr.accept_observation(
+            obs,
+            now_sec,
+            active_target=self.active_target_base,
+            task_state=self.task_state,
+        )
+
+        if not accepted:
             return
 
+        target_base = [obs.x, obs.y, obs.z]
         self.last_seen_target_base = target_base
-        self.last_seen_target_time = self.latest_target_time
+        self.last_seen_target_time = now_sec
 
-        if self.task_state in ('WAIT_PRE_TARGET', 'WAIT_GRASP_TARGET'):
-            self._update_target_window(msg)
+        # 更新 GraspContext
+        self._ctx.latest_target = obs
+        self._ctx.last_seen_target = self._target_mgr.last_seen
+        self._ctx.last_target_time = now_sec
 
+        stable = self._target_mgr.get_stable_target()
+        if stable is not None:
+            self._ctx.stable_target = stable
+
+        # 运动过程中通常不更新 active_target_base
         updatable_states = (
             'WAIT_PRE_TARGET',
             'SET_GRIPPER_ORIENTATION',
-            'MOVE_PRE_GRASP',
-            'MOVE_GRASP',
         )
         can_update_during_motion = bool(
             self.get_parameter('update_target_during_motion').value)
         if (
             self.task_state in updatable_states
             and not self.target_frozen
-            and (
+            or (
                 can_update_during_motion
-                or self.task_state in ('WAIT_PRE_TARGET', 'SET_GRIPPER_ORIENTATION')
+                and self.task_state in ('MOVE_PRE_GRASP', 'MOVE_GRASP')
+                and not self.target_frozen
             )
         ):
             self.active_target_base = target_base
-        elif self.task_state not in ('WAIT_PRE_TARGET', 'WAIT_GRASP_TARGET'):
-            self.get_logger().debug(
-                f'Target cached during {self.task_state}; active target is unchanged.')
 
     def _reject_target_jump(self, target_base: list) -> bool:
         if self.active_target_base is None:
@@ -421,24 +413,24 @@ class GraspTaskOpenLoop(Node):
             self._enter_recover()
 
     def _handle_wait_pre_target(self):
-        """Wait for the first stable visual target.
+        """等待第一个稳定视觉目标。
 
-        WAIT_PRE_TARGET is before any grasp motion — no target just means the
-        vision pipeline is not running yet.  We print a periodic warning and
-        keep waiting rather than entering RECOVER.
+        WAIT_PRE_TARGET 是抓取前等待阶段。没有目标只表示视觉管线未运行，
+        周期性 warning 并持续等待，不进入 RECOVER。
         """
         warn_sec = self._param_float('wait_pre_target_warn_sec')
         if self._state_elapsed() > warn_sec:
             self.get_logger().warning(
                 f'Still waiting for stable /visual_target_base in WAIT_PRE_TARGET '
                 f'(elapsed {self._state_elapsed():.1f}s). '
-                f'Clearing stale target window and continuing to wait.')
-            self.target_window.clear()
+                f'Clearing stale target stability and continuing to wait.')
+            self._target_mgr.reset_stability()
             self.state_start_time = self._now_sec()
             return
 
-        if self._is_target_stable():
-            self.pre_target = self._get_stable_target()
+        if self._target_mgr.has_stable_target():
+            stable = self._target_mgr.get_stable_target()
+            self.pre_target = [stable.x, stable.y, stable.z]
             if not self.target_frozen:
                 self.active_target_base = list(self.pre_target)
             self._start_approach_sequence()
@@ -590,18 +582,21 @@ class GraspTaskOpenLoop(Node):
             self._handle_approach_failure('WAIT_GRASP_TARGET timeout')
             return
 
-        if self._is_target_stable():
-            stable = self._get_stable_target()
+        if self._target_mgr.has_stable_target():
+            stable = self._target_mgr.get_stable_target()
+            grasp_xyz = [stable.x, stable.y, stable.z]
             if self.pre_target is not None:
-                drift = self._distance(stable, self.pre_target)
+                drift = self._distance(grasp_xyz, self.pre_target)
                 max_drift = self._param_float('stable_position_threshold_m') * 4.0
                 if drift > max_drift:
                     self.get_logger().error(
-                        f'Grasp target drift too large after pre-grasp: {drift:.4f}m > {max_drift:.4f}m.')
+                        f'Grasp target drift too large after pre-grasp: '
+                        f'{drift:.4f}m > {max_drift:.4f}m.')
                     self._handle_approach_failure(
-                        f'Grasp target drift too large after pre-grasp: {drift:.4f}m > {max_drift:.4f}m')
+                        f'Grasp target drift too large after pre-grasp: '
+                        f'{drift:.4f}m > {max_drift:.4f}m')
                     return
-            self.grasp_target = stable
+            self.grasp_target = grasp_xyz
             if not self.target_frozen:
                 self.active_target_base = list(self.grasp_target)
             self.get_logger().info(
@@ -1202,47 +1197,6 @@ class GraspTaskOpenLoop(Node):
 
         return True
 
-    def _update_target_window(self, msg: VisualTarget):
-        self.target_window.append({
-            'x': float(msg.x),
-            'y': float(msg.y),
-            'z': float(msg.z),
-            'depth': float(msg.depth),
-            'confidence': float(msg.confidence),
-        })
-
-    def _is_target_stable(self) -> bool:
-        required = self._param_int('stable_frame_count')
-        if len(self.target_window) < required:
-            return False
-
-        stable = self._get_stable_target()
-        max_distance = max(
-            self._distance([entry['x'], entry['y'], entry['z']], stable)
-            for entry in self.target_window
-        )
-        depth_values = [entry['depth'] for entry in self.target_window if math.isfinite(entry['depth'])]
-        max_depth_delta = 0.0
-        if depth_values:
-            median_depth = statistics.median(depth_values)
-            max_depth_delta = max(abs(depth - median_depth) for depth in depth_values)
-
-        stable_position = max_distance <= self._param_float('stable_position_threshold_m')
-        stable_depth = max_depth_delta <= self._param_float('stable_depth_threshold_m')
-        if stable_position and stable_depth:
-            self.get_logger().info(
-                f'Stable target window {len(self.target_window)}/{required}: '
-                f'max_pos={max_distance:.4f}m, max_depth={max_depth_delta:.4f}m.')
-            return True
-        return False
-
-    def _get_stable_target(self) -> list:
-        return [
-            statistics.median(entry['x'] for entry in self.target_window),
-            statistics.median(entry['y'] for entry in self.target_window),
-            statistics.median(entry['z'] for entry in self.target_window),
-        ]
-
     def _handle_approach_failure(self, reason: str):
         approach_states = ('MOVE_PRE_GRASP', 'MOVE_GRASP', 'WAIT_GRASP_TARGET')
         if self.task_state not in approach_states:
@@ -1293,7 +1247,7 @@ class GraspTaskOpenLoop(Node):
         self.active_target_base = None
         self.target_frozen = False
         self.active_motion_goal = None
-        self.target_window.clear()
+        self._target_mgr.reset_stability()
         self.recover_phase = 'OPEN_GRIPPER'
         self.pending_speed_profile = None
         self.last_reset_executor_time = None
@@ -1308,7 +1262,7 @@ class GraspTaskOpenLoop(Node):
                 f'Post-grasp recovery: keep gripper closed. reason={reason}')
         self.active_motion_goal = None
         self.lift_goal = None
-        self.target_window.clear()
+        self._target_mgr.reset_stability()
         self.recover_phase = 'KEEP_CLOSED_CLEAR_ERROR'
         self.pending_speed_profile = None
         self.last_reset_executor_time = None
@@ -1337,7 +1291,7 @@ class GraspTaskOpenLoop(Node):
         self.active_target_base = None
         self.target_frozen = False
         self.active_motion_goal = None
-        self.target_window.clear()
+        self._target_mgr.reset_stability()
         self.pending_speed_profile = None
         self.recover_phase = 'OPEN_GRIPPER'
         self.gripper_settle_start = None
@@ -1368,7 +1322,7 @@ class GraspTaskOpenLoop(Node):
         self.state_start_time = self._now_sec()
         self._reset_stage_vars()
         if clear_window:
-            self.target_window.clear()
+            self._target_mgr.reset_stability()
         if old_state != new_state:
             self.rejected_busy_count = 0
             self.get_logger().info(
@@ -1386,41 +1340,29 @@ class GraspTaskOpenLoop(Node):
             return False
         if not self._executor_accepting():
             return False
-        msg = String()
-        msg.data = self.pending_speed_profile
-        self.speed_pub.publish(msg)
+        self._cmd_port.publish_speed_profile(
+            self.pending_speed_profile, reason="speed_change")
         self.speed_profile_active = self.pending_speed_profile
         self.rejected_busy_count = 0
-        self.get_logger().info(f'Published speed_profile: {msg.data}')
+        self.get_logger().info(
+            f'Published speed_profile: {self.pending_speed_profile}')
         self.pending_speed_profile = None
         return True
 
     def _publish_cart_target(self, xyz: list):
-        msg = PointStamped()
-        msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = self.get_parameter('base_frame').value
-        msg.point.x = float(xyz[0])
-        msg.point.y = float(xyz[1])
-        msg.point.z = float(xyz[2])
-        self.cart_pub.publish(msg)
+        self._cmd_port.publish_cart_target(xyz, reason=self.task_state)
         self.rejected_busy_count = 0
 
     def _publish_joint_target(self, joint_pos: list):
-        msg = Float64MultiArray()
-        msg.data = [float(v) for v in joint_pos]
-        self.joint_pub.publish(msg)
+        self._cmd_port.publish_joint_target(joint_pos, reason=self.task_state)
         self.rejected_busy_count = 0
 
     def _publish_gripper_command(self, command: str):
-        msg = String()
-        msg.data = command
-        self.gripper_pub.publish(msg)
+        self._cmd_port.publish_gripper(command, reason=self.task_state)
         self.rejected_busy_count = 0
 
     def _publish_reset_executor(self, command: str):
-        msg = String()
-        msg.data = command
-        self.reset_executor_pub.publish(msg)
+        self._cmd_port.publish_reset(command, reason=self.task_state)
 
     def _executor_accepting(self) -> bool:
         return self.executor_status in ('IDLE', 'DONE', '')

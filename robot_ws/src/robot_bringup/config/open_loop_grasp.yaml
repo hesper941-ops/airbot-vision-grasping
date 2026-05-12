@@ -76,7 +76,7 @@ grasp_task_open_loop:
     use_last_seen_target_on_loss: true
     visual_lost_grace_sec: 0.5
     last_seen_target_max_age_sec: 8.0
-    update_target_during_motion: true
+    update_target_during_motion: false
     freeze_target_before_close: true
     require_second_visual_confirm: false
     continue_with_last_seen_during_motion: true

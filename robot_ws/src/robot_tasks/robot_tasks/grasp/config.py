@@ -83,7 +83,7 @@ class GraspTaskConfig:
     use_last_seen_target_on_loss: bool = True
     visual_lost_grace_sec: float = 0.5
     last_seen_target_max_age_sec: float = 8.0
-    update_target_during_motion: bool = True
+    update_target_during_motion: bool = False
     freeze_target_before_close: bool = True
     require_second_visual_confirm: bool = False
     continue_with_last_seen_during_motion: bool = True
