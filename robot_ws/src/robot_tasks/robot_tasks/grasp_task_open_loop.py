@@ -171,7 +171,7 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('end_pose_timeout_sec', 1.0)
         self.declare_parameter('use_last_seen_target_on_loss', True)
         self.declare_parameter('visual_lost_grace_sec', 0.5)
-        self.declare_parameter('last_seen_target_max_age_sec', 5.0)
+        self.declare_parameter('last_seen_target_max_age_sec', 8.0)
         self.declare_parameter('update_target_during_motion', False)
         self.declare_parameter('freeze_target_before_close', True)
         self.declare_parameter('require_second_visual_confirm', False)
