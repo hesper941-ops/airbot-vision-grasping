@@ -187,12 +187,11 @@ grasp_task_open_loop:
 
     # ==================================================================
     # [2.11] Active search / viewpoint search (主动搜索目标)
-    # 当 detector 检测不到目标时, 机械臂通过改变观察姿态来寻找.
-    # SEARCH_TARGET 不是 RECOVER.
-    # RECOVER 负责错误恢复; SEARCH_TARGET 负责目标不可见时主动观察.
+    # Active Search 目前仅保留配置占位，主状态机尚未接入
+    # SEARCH_TARGET；在 FixedTargetSnapshot 主链路稳定前不要启用。
     # ==================================================================
     active_search:
-      enabled: true
+      enabled: false
 
       # WAIT_TARGET 等待多久后进入 SEARCH_TARGET (second).
       target_acquire_timeout_sec: 3.0
@@ -216,6 +215,7 @@ grasp_task_open_loop:
 
     # ==================================================================
     # [2.12] Search poses (搜索姿态)
+    # 后续扩展占位：当前主流程尚未接入主动搜索，不会使用这些姿态。
     # 所有 joint_pos 使用 rad.
     # 以下姿态值仅为占位示例, 真实部署前必须根据 AIRBOT 实物姿态、
     # 关节限制、桌面高度和相机视野重新确认.
@@ -253,8 +253,8 @@ grasp_task_open_loop:
 
     # ==================================================================
     # [2.13] Target types (目标类型配置)
-    # 后续新增目标类型时只需在这里添加配置和对应 detector topic,
-    # 不需要大改抓取状态机.
+    # 后续扩展占位：当前主流程仍使用 /visual_target_base，不代表已经
+    # 支持主动搜索或多目标自动切换。
     # ==================================================================
     target_types:
       duck:

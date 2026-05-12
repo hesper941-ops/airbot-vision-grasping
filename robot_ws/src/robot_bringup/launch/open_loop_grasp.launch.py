@@ -1,12 +1,12 @@
 """Launch the default open-loop grasp pipeline.
 
-Default pipeline:
-  1. arm_executor_node owns the robot hardware.
-  2. Orbbec_ws publishes /visual_target_base in base_link separately.
-  3. grasp_task_open_loop consumes /visual_target_base and sends commands.
+This launch file starts only:
+  1. arm_executor_node
+  2. grasp_task_open_loop
 
-The old camera-to-base bridge is removed from this flow; publish
-/visual_target_base directly from the vision workspace.
+camera_to_base_transform.py is still part of the recommended main pipeline,
+but it is started by the user in another terminal. It converts /duck_position
+to /visual_target_base for grasp_task_open_loop.
 """
 
 import os
