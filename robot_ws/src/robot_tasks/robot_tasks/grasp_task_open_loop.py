@@ -212,6 +212,7 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('close_gripper_timeout_sec', 4.0)
         self.declare_parameter('recover_timeout_sec', 15.0)
         self.declare_parameter('rejected_busy_recover_threshold', 2)
+        self.declare_parameter('recover_clear_error_interval_sec', 0.5)
         self.declare_parameter('auto_recover_joint_limit', True)
         self.declare_parameter('loop_hz', 4.0)
 
@@ -1015,11 +1016,22 @@ class GraspTaskOpenLoop(Node):
 
         if self.executor_status == 'ERROR':
             now = self._now_sec()
-            if self.last_reset_executor_time is None or now - self.last_reset_executor_time >= 0.5:
-                self._publish_reset_executor('clear_error')
+            interval_sec = self._param_float('recover_clear_error_interval_sec')
+            if (
+                self.last_reset_executor_time is None
+                or now - self.last_reset_executor_time >= interval_sec
+            ):
+                reset_command = 'clear_error'
+                if bool(self.get_parameter('auto_recover_joint_limit').value):
+                    reset_command = 'recover_joint_limit'
+                self._publish_reset_executor(reset_command)
                 self.last_reset_executor_time = now
-                self.get_logger().warning(
-                    'RECOVER: clear executor error.')
+                if reset_command == 'recover_joint_limit':
+                    self.get_logger().warning(
+                        'RECOVER: request recover_joint_limit')
+                else:
+                    self.get_logger().warning(
+                        'RECOVER: clear executor error.')
             if self.recover_phase.startswith('KEEP_CLOSED'):
                 return
             return

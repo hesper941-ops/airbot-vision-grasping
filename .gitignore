@@ -14,11 +14,13 @@ __pycache__/
 # ===== VSCode / JetBrains =====
 .vscode/
 .idea/
+.claude/
 
 # ===== ROS / colcon build outputs =====
 build/
 install/
 log/
+logs/
 
 # ===== Workspace-specific generated dirs =====
 Orbbec_ws/build/
@@ -31,6 +33,7 @@ robot_ws/log/
 
 # ===== Runtime logs =====
 robot_ws/airbot_logs/
+airbot_logs/
 
 # ===== Hand-eye generated data =====
 hand_to_eye/data/images/
@@ -40,3 +43,9 @@ hand_to_eye/data/handeye_output/
 # ===== Optional dataset caches =====
 *.bag
 *.db3
+
+# ===== Local debug leftovers =====
+*.bak
+*.bak_*
+log_*.txt
+robot_ws/tmp*/
