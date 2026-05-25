@@ -23,7 +23,6 @@ class GraspPlanner:
         self.final_grasp_clearance = float(config.get('final_grasp_clearance', 0.015))
         self.front_approach_x_offset = float(config.get('front_approach_x_offset', -0.10))
         self.front_approach_z_offset = float(config.get('front_approach_z_offset', 0.05))
-        self.front_grasp_x_offset = float(config.get('front_grasp_x_offset', 0.0))
         self.min_safe_motion_z = float(config.get('min_safe_motion_z', 0.08))
         self.reject_target_below_table = bool(config.get('reject_target_below_table', True))
         self.joint6_compensation_deg = config.get('joint6_compensation_deg', 90.0)
@@ -91,9 +90,8 @@ class GraspPlanner:
         """Return a final grasp waypoint that never goes below table clearance."""
         target = self._validate_target(target_xyz)
         min_grasp_z = self.safe_motion_z if self.approach_mode == 'front' else self.final_grasp_z
-        x = target[0] + (self.front_grasp_x_offset if self.approach_mode == 'front' else 0.0)
         waypoint = [
-            x,
+            target[0],
             target[1],
             max(target[2] + self.grasp_z_offset, min_grasp_z),
         ]

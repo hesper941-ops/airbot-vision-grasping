@@ -92,11 +92,10 @@ grasp_task_open_loop:
 
     # 预抓取 / 抓取 / 抬升 / 前方靠近偏移量 (meter).
     pre_grasp_z_offset: 0.14
-    grasp_z_offset: 0.01
+    grasp_z_offset: 0.02
     lift_z_offset: 0.12
     front_approach_x_offset: -0.10
     front_approach_z_offset: 0.05
-    front_grasp_x_offset: 0.065
 
     # ==================================================================
     # [2.5] J6 end-effector orientation (末端夹爪方向)
@@ -160,8 +159,8 @@ grasp_task_open_loop:
     # ==================================================================
     # 单步最大步长, 必须小于 AirbotWrapper 的 0.100 m 限制.
     max_cartesian_step: 0.08
-    position_tolerance: 0.01
-    position_tolerance_m: 0.01
+    position_tolerance: 0.02
+    position_tolerance_m: 0.02
     settle_time_sec: 0.5
     joint_speed_safe_threshold: 0.1
     post_joint_rotate_settle_sec: 0.5

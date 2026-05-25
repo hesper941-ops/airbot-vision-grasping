@@ -92,11 +92,10 @@ grasp_task_open_loop:
 
     # 预抓取 / 抓取 / 抬升 / 前方靠近偏移量 (meter).
     pre_grasp_z_offset: 0.14
-    grasp_z_offset: 0.01
+    grasp_z_offset: 0.02
     lift_z_offset: 0.12
     front_approach_x_offset: -0.10
     front_approach_z_offset: 0.05
-    front_grasp_x_offset: 0.065
 
     # ==================================================================
     # [2.5] J6 end-effector orientation (末端夹爪方向)
