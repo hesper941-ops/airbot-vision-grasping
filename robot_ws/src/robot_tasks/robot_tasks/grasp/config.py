@@ -100,6 +100,8 @@ class GraspTaskConfig:
     lift_z_offset: float = 0.12
     front_approach_x_offset: float = -0.10
     front_approach_z_offset: float = 0.05
+    front_grasp_x_offset: float = 0.065
+    front_grasp_x_offset_max: float = 0.075
 
     # -- Table / workspace safety (meters) -----------------------------------
     table_z: float = 0.0
@@ -108,6 +110,7 @@ class GraspTaskConfig:
     min_safe_motion_z: float = 0.08
     reject_target_below_table: bool = True
     safe_pose: List[float] = field(default_factory=lambda: [0.35, 0.0, 0.35])
+    official_reach_radius_m: float = 0.647
 
     workspace_x_min: float = 0.10
     workspace_x_max: float = 0.65
@@ -158,6 +161,7 @@ class GraspTaskConfig:
     # -- Recovery ------------------------------------------------------------
     recover_clear_error_interval_sec: float = 0.5
     recover_return_init_pose: bool = True
+    auto_recover_joint_limit: bool = True
 
     # -- Active search -------------------------------------------------------
     active_search: ActiveSearchConfig = field(default_factory=ActiveSearchConfig)
@@ -243,6 +247,8 @@ class GraspTaskConfig:
             lift_z_offset=_pf("lift_z_offset", 0.12),
             front_approach_x_offset=_pf("front_approach_x_offset", -0.10),
             front_approach_z_offset=_pf("front_approach_z_offset", 0.05),
+            front_grasp_x_offset=_pf("front_grasp_x_offset", 0.065),
+            front_grasp_x_offset_max=_pf("front_grasp_x_offset_max", 0.075),
 
             table_z=_pf("table_z", 0.0),
             table_clearance=_pf("table_clearance", 0.04),
@@ -250,6 +256,7 @@ class GraspTaskConfig:
             min_safe_motion_z=_pf("min_safe_motion_z", 0.08),
             reject_target_below_table=_pb("reject_target_below_table", True),
             safe_pose=_plf("safe_pose", [0.35, 0.0, 0.35]),
+            official_reach_radius_m=_pf("official_reach_radius_m", 0.647),
 
             workspace_x_min=wx_min, workspace_x_max=wx_max,
             workspace_y_min=wy_min, workspace_y_max=wy_max,
@@ -290,6 +297,7 @@ class GraspTaskConfig:
 
             recover_clear_error_interval_sec=_pf("recover_clear_error_interval_sec", 0.5),
             recover_return_init_pose=_pb("recover_return_init_pose", True),
+            auto_recover_joint_limit=_pb("auto_recover_joint_limit", True),
 
             active_search=asc,
         )

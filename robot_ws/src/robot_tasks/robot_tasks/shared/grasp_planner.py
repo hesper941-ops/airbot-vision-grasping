@@ -23,8 +23,11 @@ class GraspPlanner:
         self.final_grasp_clearance = float(config.get('final_grasp_clearance', 0.015))
         self.front_approach_x_offset = float(config.get('front_approach_x_offset', -0.10))
         self.front_approach_z_offset = float(config.get('front_approach_z_offset', 0.05))
+        self.front_grasp_x_offset = float(config.get('front_grasp_x_offset', 0.065))
+        self.front_grasp_x_offset_max = float(config.get('front_grasp_x_offset_max', 0.075))
         self.min_safe_motion_z = float(config.get('min_safe_motion_z', 0.08))
         self.reject_target_below_table = bool(config.get('reject_target_below_table', True))
+        self.official_reach_radius_m = float(config.get('official_reach_radius_m', 0.647))
         self.joint6_compensation_deg = config.get('joint6_compensation_deg', 90.0)
         self.j6_home_deg = float(config.get('j6_home_deg', 90.0))
         self.j6_allowed_delta_deg = float(config.get('j6_allowed_delta_deg', 90.0))
@@ -89,13 +92,45 @@ class GraspPlanner:
     def compute_safe_grasp(self, target_xyz: list) -> list:
         """Return a final grasp waypoint that never goes below table clearance."""
         target = self._validate_target(target_xyz)
+        self.validate_front_grasp_x_offset()
         min_grasp_z = self.safe_motion_z if self.approach_mode == 'front' else self.final_grasp_z
-        waypoint = [
-            target[0],
-            target[1],
-            max(target[2] + self.grasp_z_offset, min_grasp_z),
-        ]
+        waypoint = self.compute_final_grasp_point(target)
+        waypoint[2] = max(waypoint[2], min_grasp_z)
         return self.validate_waypoint(waypoint, is_final_grasp=True)
+
+    def compute_final_grasp_point(self, target_xyz: list) -> list:
+        """Return the final grasp point before workspace/radius validation."""
+        target = self._validate_target(target_xyz)
+        x = target[0]
+        if self.approach_mode == 'front':
+            x = target[0] + self.front_grasp_x_offset
+        return [
+            x,
+            target[1],
+            target[2] + self.grasp_z_offset,
+        ]
+
+    def validate_front_grasp_x_offset(self):
+        """Reject unsafe configuration instead of silently clamping it."""
+        if abs(self.front_grasp_x_offset) > self.front_grasp_x_offset_max:
+            raise ValueError(
+                'front_grasp_x_offset exceeds configured maximum: '
+                f'offset={self.front_grasp_x_offset:.3f}m, '
+                f'max={self.front_grasp_x_offset_max:.3f}m.')
+
+    def compute_radius(self, xyz: list) -> float:
+        point = self._validate_xyz(xyz, name='xyz')
+        return math.sqrt(point[0] ** 2 + point[1] ** 2 + point[2] ** 2)
+
+    def validate_official_workspace(self, xyz: list, label: str = 'point'):
+        """Enforce AIRBOT Play official reach radius as a hard boundary."""
+        point = self._validate_xyz(xyz, name=label)
+        radius = self.compute_radius(point)
+        if radius > self.official_reach_radius_m:
+            raise ValueError(
+                f'{label} radius={radius:.3f}m exceeds official_reach_radius_m='
+                f'{self.official_reach_radius_m:.3f}m, point={self._fmt_xyz(point)}.')
+        return point
 
     def compute_safe_lift(self, current_xyz: list) -> list:
         """Return a vertical lift target without dragging sideways."""

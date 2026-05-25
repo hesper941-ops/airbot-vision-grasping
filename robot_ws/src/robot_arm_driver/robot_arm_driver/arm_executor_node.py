@@ -14,6 +14,7 @@ not applied so that the task layer always receives clear feedback.
 
 import math
 import threading
+import traceback
 from typing import Any, Optional, Tuple
 
 import rclpy
@@ -56,6 +57,8 @@ class ArmExecutorNode(Node):
             'joint_max_rad',
             [2.0944, 0.1745, 3.1416, 2.5831, 1.7453, 2.9671],
         )
+        self.declare_parameter('rescue_warning_margin_rad', 0.20)
+        self.declare_parameter('rescue_safe_margin_rad', 0.40)
 
         self.arm = AirbotWrapper(url='localhost', port=50001)
         self.sdk_lock = threading.Lock()
@@ -228,6 +231,135 @@ class ArmExecutorNode(Node):
             if self._get_executor_state() != self.ERROR:
                 self._publish_executor_status(self.IDLE)
 
+    def _get_init_joint_target_rad(self) -> Optional[list]:
+        """Return init_joint_pos_deg converted to radians after validation."""
+        deg = list(self.get_parameter('init_joint_pos_deg').value)
+
+        if len(deg) != 6:
+            self.get_logger().error(
+                f'init_joint_pos_deg length is {len(deg)}, expected 6.')
+            return None
+
+        rad = [self._deg2rad(float(v)) for v in deg]
+        if not self._validate_joint_target(rad):
+            self.get_logger().error(
+                'init_joint_pos_deg violates joint limits.')
+            return None
+        return rad
+
+    def _log_gripper_state_if_available(self):
+        """Log gripper telemetry only when the wrapper already exposes it."""
+        read_methods = (
+            'get_gripper_width',
+            'get_gripper_pos',
+            'get_gripper_position',
+            'get_gripper_state',
+            'get_gripper_current',
+            'get_gripper_force',
+            'get_gripper_torque',
+        )
+        observed = {}
+        for name in read_methods:
+            method = getattr(self.arm, name, None)
+            if callable(method):
+                try:
+                    observed[name] = method()
+                except Exception as exc:
+                    observed[name] = f'unavailable: {exc}'
+
+        if observed:
+            self.get_logger().info(
+                f'recover_joint_limit gripper telemetry (read-only): {observed}')
+        else:
+            self.get_logger().info(
+                'recover_joint_limit: no read-only gripper telemetry exposed by wrapper; '
+                'gripper state will be preserved without modification.')
+
+    def _start_recover_joint_limit(self):
+        with self.status_lock:
+            if self.executor_state == self.BUSY:
+                self.get_logger().warning(
+                    'Executor busy; reject recover_joint_limit command.')
+                self._publish_executor_status_locked(self.REJECTED_BUSY)
+                self._publish_executor_status_locked(self.BUSY)
+                return
+
+            self.executor_state = self.BUSY
+            self.get_logger().warning(
+                f'Executor status: BUSY recover_joint_limit (previous={self.executor_state})')
+            self._publish_executor_status_locked(self.BUSY)
+
+        thread = threading.Thread(
+            target=self._execute_recover_joint_limit,
+            daemon=True,
+        )
+        self.active_thread = thread
+        thread.start()
+
+    def _execute_recover_joint_limit(self):
+        try:
+            with self.sdk_lock:
+                self.arm.set_speed_profile('slow')
+                self._log_gripper_state_if_available()
+
+                current = [float(v) for v in self.arm.get_joint_pos()]
+                if len(current) != 6:
+                    raise RuntimeError(
+                        f'arm.get_joint_pos() returned {len(current)} joints, expected 6.')
+
+                joint_min, joint_max = self._get_joint_limits()
+                warning_margin = float(
+                    self.get_parameter('rescue_warning_margin_rad').value)
+                safe_margin = float(
+                    self.get_parameter('rescue_safe_margin_rad').value)
+                rescue_target = list(current)
+                adjusted = []
+
+                for i in range(6):
+                    low = float(joint_min[i])
+                    high = float(joint_max[i])
+                    value = float(current[i])
+                    upper_warn = high - warning_margin
+                    lower_warn = low + warning_margin
+
+                    if value > upper_warn:
+                        rescue_target[i] = high - safe_margin
+                        adjusted.append(f'J{i+1}:high')
+                    elif value < lower_warn:
+                        rescue_target[i] = low + safe_margin
+                        adjusted.append(f'J{i+1}:low')
+
+                if adjusted:
+                    if not self._validate_joint_target(rescue_target):
+                        raise RuntimeError(
+                            'recover_joint_limit rescue_target violates joint limits.')
+                    self.get_logger().warning(
+                        'recover_joint_limit: stepping away from configured joint limits. '
+                        f'current={current}, rescue_target={rescue_target}, adjusted={adjusted}')
+                    self.arm.move_joints(rescue_target)
+                else:
+                    self.get_logger().info(
+                        'recover_joint_limit: no joint is within warning margin; '
+                        'skip step-away and go directly to init pose.')
+
+                init_target = self._get_init_joint_target_rad()
+                if init_target is None:
+                    raise RuntimeError(
+                        'recover_joint_limit cannot continue because init_joint_pos_deg is invalid.')
+
+                self.get_logger().info(
+                    f'recover_joint_limit: moving to init pose rad={init_target}')
+                self.arm.move_joints(init_target)
+
+            self.get_logger().info('recover_joint_limit completed successfully.')
+            self._publish_executor_status(self.DONE)
+            self._publish_executor_status(self.IDLE)
+        except Exception as exc:
+            sdk_output = getattr(self.arm, 'last_sdk_output', '')
+            self._set_error(
+                'recover_joint_limit failed: '
+                f'{exc}; sdk_output={sdk_output}; traceback={traceback.format_exc()}')
+
     # ------------------------------------------------------------------
     # Command callbacks
     # ------------------------------------------------------------------
@@ -285,6 +417,10 @@ class ArmExecutorNode(Node):
 
     def reset_callback(self, msg: String):
         command = msg.data.strip().lower()
+        if command == 'recover_joint_limit':
+            self._start_recover_joint_limit()
+            return
+
         if command != 'clear_error':
             self.get_logger().warning(f'Unknown reset_executor command: {command}')
             return
