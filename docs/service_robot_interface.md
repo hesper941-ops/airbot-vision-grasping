@@ -8,7 +8,7 @@
 - 不使用 MoveIt。
 - 不新增 `/grasp_object` Action。
 - 不新增 `/grasp/check_target` 服务。
-- 外部模块不要直接发布 `/robot_arm/cart_target`、`/robot_arm/target_joint`、`/robot_arm/gripper_cmd`。
+- 外部模块不要直接发布 `/robot_arm/cart_target`、`/robot_arm/cart_waypoints`、`/robot_arm/target_joint`、`/robot_arm/gripper_cmd`。
 
 一句话说明：外部模块只需要提供 `base_link` 坐标系下的 `/visual_target_base`，`grasp_task_open_loop.py` 会按 open-loop 状态机执行抓取，`arm_executor_node.py` 是唯一 AIRBOT SDK owner。
 
@@ -41,6 +41,20 @@ duck_detector_node
   -> arm_executor_node.py
   -> AIRBOT SDK
 ```
+
+Default approach behavior:
+- `blend_approach_enabled: true`
+- The default front approach is `pre_grasp -> final_grasp` through the internal
+  `/robot_arm/cart_waypoints` path.
+- The legacy `MOVE_PRE_GRASP -> MOVE_GRASP` two-step approach remains available
+  as fallback, and is also used when `blend_approach_enabled: false`.
+- This does not use official `ArmControlOptions` or `blend_radius` parameters.
+  It uses the existing SDK `PLANNING_WAYPOINTS / move_with_cart_waypoints`
+  path through `AirbotWrapper.move_cart_waypoints()`.
+- External callers and LLM modules should still publish only
+  `/visual_target_base` in `base_link`. Do not publish `/robot_arm/cart_waypoints`
+  directly; it is an internal execution topic between `grasp_task_open_loop.py`
+  and `arm_executor_node.py`.
 
 必须注意：
 
@@ -143,6 +157,7 @@ python3 /home/sunrise/robot/hand_to_eye/camera_to_base_transform.py
 | `/robot_arm/end_pose` | `geometry_msgs/msg/PoseStamped` | 执行器发布 | 当前末端位姿 |
 | `/robot_arm/reset_executor` | `std_msgs/msg/String` | 抓取状态机发布；执行器订阅 | 恢复命令，支持 `clear_error` 和 `recover_joint_limit` |
 | `/robot_arm/cart_target` | `geometry_msgs/msg/PointStamped` | 抓取状态机发布；执行器订阅 | 底层笛卡尔目标 |
+| `/robot_arm/cart_waypoints` | `geometry_msgs/msg/PoseArray` | `grasp_task_open_loop.py` internal publisher; `arm_executor_node.py` subscriber | Internal pre_grasp -> final_grasp waypoint execution topic; external modules should not publish it directly |
 | `/robot_arm/target_joint` | `std_msgs/msg/Float64MultiArray` | 抓取状态机发布；执行器订阅 | 底层关节目标 |
 | `/robot_arm/gripper_cmd` | `std_msgs/msg/String` | 抓取状态机发布；执行器订阅 | 夹爪控制 |
 

@@ -71,6 +71,7 @@ class GraspTaskOpenLoop(Node):
         self.grasp_closed = False
         self.lift_goal: Optional[list] = None
         self.stage_full_goal: Optional[list] = None
+        self.blend_waypoints: Optional[list] = None
         self.recover_lift_goal: Optional[list] = None
 
         self.state_command_sent = False
@@ -141,6 +142,8 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('approach_priority', ['front', 'top_down'])
         self.declare_parameter('front_first_then_top_down', True)
         self.declare_parameter('max_approach_mode_retries', 1)
+        self.declare_parameter('blend_approach_enabled', True)
+        self.declare_parameter('blend_approach_fallback_to_sequential', True)
         self.declare_parameter('continue_with_last_seen_during_motion', True)
         self.declare_parameter('table_z', 0.0)
         self.declare_parameter('table_clearance', 0.04)
@@ -305,7 +308,7 @@ class GraspTaskOpenLoop(Node):
             and not self.target_frozen
             or (
                 can_update_during_motion
-                and self.task_state in ('MOVE_PRE_GRASP', 'MOVE_GRASP')
+                and self.task_state in ('MOVE_PRE_GRASP', 'MOVE_GRASP', 'MOVE_APPROACH_BLEND')
                 and not self.target_frozen
             )
         ):
@@ -314,7 +317,7 @@ class GraspTaskOpenLoop(Node):
     def _reject_target_jump(self, target_base: list) -> bool:
         if self.active_target_base is None:
             return False
-        if self.task_state not in ('MOVE_PRE_GRASP', 'MOVE_GRASP'):
+        if self.task_state not in ('MOVE_PRE_GRASP', 'MOVE_GRASP', 'MOVE_APPROACH_BLEND'):
             return False
 
         distance = self._distance(self.active_target_base, target_base)
@@ -360,6 +363,10 @@ class GraspTaskOpenLoop(Node):
             if self.rejected_busy_count >= threshold:
                 self.get_logger().error(
                     f'REJECTED_BUSY {self.rejected_busy_count} times (>= {threshold}); handling approach failure.')
+                if self.task_state == 'MOVE_APPROACH_BLEND':
+                    self._fallback_blend_to_sequential(
+                        f'REJECTED_BUSY {self.rejected_busy_count} times')
+                    return
                 self._handle_approach_failure(
                     f'REJECTED_BUSY {self.rejected_busy_count} times')
             else:
@@ -373,6 +380,13 @@ class GraspTaskOpenLoop(Node):
                 self.get_logger().debug(
                     f'Executor status {self.executor_status} ignored '
                     f'because already in {self.task_state}.')
+                return
+            if self.task_state == 'MOVE_APPROACH_BLEND':
+                self.get_logger().error(
+                    f'Executor {self.executor_status} detected during MOVE_APPROACH_BLEND; '
+                    'entering RECOVER.')
+                self._enter_recover(
+                    f'executor_error: Executor status {self.executor_status}')
                 return
             self.get_logger().error(
                 f'Executor {self.executor_status} detected; entering RECOVER. '
@@ -399,6 +413,9 @@ class GraspTaskOpenLoop(Node):
 
             elif self.task_state == 'MOVE_PRE_GRASP':
                 self._handle_move_pre_grasp()
+
+            elif self.task_state == 'MOVE_APPROACH_BLEND':
+                self._handle_move_approach_blend()
 
             elif self.task_state == 'WAIT_GRASP_TARGET':
                 self._handle_wait_grasp_target()
@@ -621,7 +638,83 @@ class GraspTaskOpenLoop(Node):
 
         if self._now_sec() - self.settle_start_time >= self._param_float('post_joint_rotate_settle_sec'):
             self._set_speed_profile('fast')
+            if self._should_use_blend_approach():
+                self._transition('MOVE_APPROACH_BLEND')
+            else:
+                self._transition('MOVE_PRE_GRASP')
+
+    def _should_use_blend_approach(self) -> bool:
+        if not bool(self.get_parameter('blend_approach_enabled').value):
+            return False
+        self._ensure_approach_mode_started()
+        return self.current_approach_mode == 'front'
+
+    def _fallback_blend_to_sequential(self, reason: str):
+        if bool(self.get_parameter('blend_approach_fallback_to_sequential').value):
+            self.get_logger().warning(
+                'BLEND_APPROACH: fallback to sequential MOVE_PRE_GRASP -> MOVE_GRASP')
+            self._reset_stage_vars()
             self._transition('MOVE_PRE_GRASP')
+            return
+
+        self.get_logger().error(
+            'BLEND_APPROACH: waypoint execution failed; fallback disabled; entering RECOVER')
+        self._enter_recover(reason)
+
+    def _handle_move_approach_blend(self):
+        if self._state_elapsed() > self._param_float('motion_timeout_sec'):
+            self.get_logger().error('MOVE_APPROACH_BLEND timeout.')
+            self._fallback_blend_to_sequential('MOVE_APPROACH_BLEND timeout')
+            return
+
+        if self.pending_speed_profile is not None:
+            return
+
+        if not self._fresh_end_pose_available():
+            return
+
+        if self.blend_waypoints is None:
+            pre_grasp = self._compute_pre_grasp_from_active_target()
+            if self.task_state != 'MOVE_APPROACH_BLEND':
+                return
+            final_grasp = self._compute_grasp_from_active_target()
+            if self.task_state != 'MOVE_APPROACH_BLEND':
+                return
+            if pre_grasp is None or final_grasp is None:
+                reason = self.last_target_failure_reason or 'MOVE_APPROACH_BLEND invalid waypoint'
+                self._fallback_blend_to_sequential(reason)
+                return
+            self.blend_waypoints = [list(pre_grasp), list(final_grasp)]
+
+        if not self.state_command_sent:
+            if not self._executor_accepting():
+                return
+            try:
+                self.get_logger().warning(
+                    'BLEND_APPROACH: publish waypoints pre_grasp -> final_grasp')
+                self._publish_cart_waypoints(self.blend_waypoints)
+            except Exception as exc:
+                self.get_logger().error(
+                    f'MOVE_APPROACH_BLEND publish failed: {exc}')
+                self._fallback_blend_to_sequential(
+                    f'MOVE_APPROACH_BLEND publish failed: {exc}')
+                return
+            self.state_command_sent = True
+            self.stage_motion_started = False
+            self.active_motion_goal = list(self.blend_waypoints[-1])
+            return
+
+        if self.executor_status == 'BUSY':
+            self.stage_motion_started = True
+            return
+
+        if self.executor_status == 'DONE' or (
+            self.stage_motion_started and self.executor_status == 'IDLE'
+        ):
+            self.get_logger().warning(
+                'BLEND_APPROACH: waypoints done; entering CLOSE_GRIPPER')
+            self._reset_stage_vars()
+            self._after_move_grasp()
 
     def _handle_move_pre_grasp(self):
         if self.stage_full_goal is not None:
@@ -1293,7 +1386,7 @@ class GraspTaskOpenLoop(Node):
         return True
 
     def _handle_approach_failure(self, reason: str):
-        approach_states = ('MOVE_PRE_GRASP', 'MOVE_GRASP', 'WAIT_GRASP_TARGET')
+        approach_states = ('MOVE_APPROACH_BLEND', 'MOVE_PRE_GRASP', 'MOVE_GRASP', 'WAIT_GRASP_TARGET')
         if self.task_state not in approach_states:
             if self.grasp_closed:
                 self._enter_post_grasp_recover(reason)
@@ -1440,6 +1533,7 @@ class GraspTaskOpenLoop(Node):
         self.settle_start_time = None
         self.active_motion_goal = None
         self.stage_full_goal = None
+        self.blend_waypoints = None
 
     def _transition(self, new_state: str, clear_window: bool = False):
         old_state = self.task_state
@@ -1476,6 +1570,11 @@ class GraspTaskOpenLoop(Node):
 
     def _publish_cart_target(self, xyz: list):
         self._cmd_port.publish_cart_target(xyz, reason=self.task_state)
+        self.rejected_busy_count = 0
+
+    def _publish_cart_waypoints(self, points: list):
+        self._cmd_port.publish_cart_waypoints(
+            points, frame_id=self.get_parameter('base_frame').value)
         self.rejected_busy_count = 0
 
     def _publish_joint_target(self, joint_pos: list):

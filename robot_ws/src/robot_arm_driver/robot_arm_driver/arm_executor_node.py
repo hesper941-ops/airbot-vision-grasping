@@ -18,7 +18,7 @@ import traceback
 from typing import Any, Optional, Tuple
 
 import rclpy
-from geometry_msgs.msg import PointStamped, PoseStamped
+from geometry_msgs.msg import PointStamped, PoseArray, PoseStamped
 from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray, String
 
@@ -100,6 +100,12 @@ class ArmExecutorNode(Node):
             self.cart_target_callback,
             10,
         )
+        self.cart_waypoints_sub = self.create_subscription(
+            PoseArray,
+            '/robot_arm/cart_waypoints',
+            self.cart_waypoints_callback,
+            10,
+        )
         self.gripper_sub = self.create_subscription(
             String,
             '/robot_arm/gripper_cmd',
@@ -127,7 +133,8 @@ class ArmExecutorNode(Node):
 
         self.get_logger().info(
             'ArmExecutorNode started. Listening on /robot_arm/target_joint, '
-            '/robot_arm/cart_target, /robot_arm/gripper_cmd, /robot_arm/gripper_command, '
+            '/robot_arm/cart_target, /robot_arm/cart_waypoints, '
+            '/robot_arm/gripper_cmd, /robot_arm/gripper_command, '
             '/robot_arm/speed_profile, '
             '/robot_arm/reset_executor.')
         self.get_logger().info(
@@ -389,6 +396,35 @@ class ArmExecutorNode(Node):
         target = [float(msg.point.x), float(msg.point.y), float(msg.point.z)]
         self._try_start_command('cartesian', target)
 
+    def cart_waypoints_callback(self, msg: PoseArray):
+        frame_id = msg.header.frame_id.strip()
+        if frame_id and frame_id != 'base_link':
+            self.get_logger().error(
+                f'Invalid cart waypoints frame_id={frame_id}; expected base_link.')
+            return
+
+        count = len(msg.poses)
+        self.get_logger().info(f'cart_waypoints received: n={count}')
+        if count < 2:
+            self.get_logger().error(
+                f'Invalid cart_waypoints count: {count} (expected >= 2).')
+            return
+
+        points = []
+        for index, pose in enumerate(msg.poses):
+            point = [
+                float(pose.position.x),
+                float(pose.position.y),
+                float(pose.position.z),
+            ]
+            if not all(math.isfinite(v) for v in point):
+                self.get_logger().error(
+                    f'Invalid cart_waypoints[{index}] contains non-finite position: {point}')
+                return
+            points.append(point)
+
+        self._try_start_command('cart_waypoints', points)
+
     def gripper_callback(self, msg: String):
         command = msg.data.strip().lower()
         if command not in ('open', 'close'):
@@ -474,6 +510,18 @@ class ArmExecutorNode(Node):
                     self.arm.move_joints(payload)
                 elif command_type == 'cartesian':
                     self.arm.move_to_cart_target_with_current_orientation(payload)
+                elif command_type == 'cart_waypoints':
+                    self.get_logger().info(
+                        'Executing cartesian waypoints with current orientation')
+                    end_pose = self.arm.get_end_pose()
+                    if end_pose is None or len(end_pose) < 2:
+                        raise RuntimeError('Failed to read current end pose.')
+                    current_quat = list(end_pose[1])
+                    waypoints = [
+                        [[float(point[0]), float(point[1]), float(point[2])], current_quat]
+                        for point in payload
+                    ]
+                    self.arm.move_cart_waypoints(waypoints)
                 elif command_type == 'gripper':
                     if payload == 'open':
                         self.arm.open_gripper()
@@ -496,6 +544,8 @@ class ArmExecutorNode(Node):
         except Exception as exc:
             current_end_pose = self._current_end_pose_for_log()
             sdk_output = getattr(self.arm, 'last_sdk_output', '')
+            if command_type == 'cart_waypoints':
+                self.get_logger().error(f'cart_waypoints failed: {exc}')
             self._set_error(
                 f'Motion command failed: command_type={command_type}, '
                 f'target={payload}, current_end_pose={current_end_pose}, '

@@ -15,6 +15,20 @@ duck_detector_node
   -> AIRBOT SDK
 ```
 
+Default approach behavior:
+- `blend_approach_enabled: true`
+- The default front approach is `pre_grasp -> final_grasp` through the internal
+  `/robot_arm/cart_waypoints` path.
+- The legacy `MOVE_PRE_GRASP -> MOVE_GRASP` two-step approach remains available
+  as fallback, and is also used when `blend_approach_enabled: false`.
+- This does not use official `ArmControlOptions` or `blend_radius` parameters.
+  It uses the existing SDK `PLANNING_WAYPOINTS / move_with_cart_waypoints`
+  path through `AirbotWrapper.move_cart_waypoints()`.
+- External callers and LLM modules should still publish only
+  `/visual_target_base` in `base_link`. Do not publish `/robot_arm/cart_waypoints`
+  directly; it is an internal execution topic between `grasp_task_open_loop.py`
+  and `arm_executor_node.py`.
+
 不要把 `hand_to_eye/auto_pick_from_base.py` 当作主抓取入口；它只保留为 legacy/debug 调试脚本。当前主抓取节点是 `grasp_task_open_loop.py`，执行器节点是 `arm_executor_node.py`。
 
 当前唯一推荐启动入口：

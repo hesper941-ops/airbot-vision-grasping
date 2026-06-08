@@ -93,6 +93,8 @@ grasp_task_open_loop:
     approach_priority: ["front", "top_down"]
     front_first_then_top_down: true
     max_approach_mode_retries: 1
+    blend_approach_enabled: true
+    blend_approach_fallback_to_sequential: true
 
     # 预抓取 / 抓取 / 抬升 / 前方靠近偏移量 (meter).
     pre_grasp_z_offset: 0.14
@@ -165,10 +167,10 @@ grasp_task_open_loop:
     # Unit: meter / second.
     # ==================================================================
     # 单步最大步长, 必须小于 AirbotWrapper 的 0.100 m 限制.
-    max_cartesian_step: 0.08
+    max_cartesian_step: 0.04
     position_tolerance: 0.02
-    position_tolerance_m: 0.02
-    settle_time_sec: 0.5
+    position_tolerance_m: 0.015
+    settle_time_sec: 0.8
     joint_speed_safe_threshold: 0.1
     post_joint_rotate_settle_sec: 0.5
     end_pose_timeout_sec: 1.0
@@ -179,7 +181,7 @@ grasp_task_open_loop:
     # ==================================================================
     wait_pre_target_warn_sec: 15.0
     wait_grasp_target_timeout_sec: 8.0
-    motion_timeout_sec: 12.0
+    motion_timeout_sec: 16.0
     set_orientation_timeout_sec: 8.0
     close_gripper_timeout_sec: 4.0
     recover_timeout_sec: 15.0

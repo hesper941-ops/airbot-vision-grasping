@@ -3,7 +3,7 @@
 所有发往机械臂执行器的命令都通过此端口。任务层各模块不直接持有 publisher。
 """
 
-from geometry_msgs.msg import PointStamped
+from geometry_msgs.msg import PointStamped, Pose, PoseArray
 from std_msgs.msg import Float64MultiArray, String
 
 
@@ -22,6 +22,8 @@ class ArmCommandPort:
             Float64MultiArray, "/robot_arm/target_joint", 10)
         self._cart_pub = node.create_publisher(
             PointStamped, "/robot_arm/cart_target", 10)
+        self._cart_waypoints_pub = node.create_publisher(
+            PoseArray, "/robot_arm/cart_waypoints", 10)
         self._gripper_pub = node.create_publisher(
             String, "/robot_arm/gripper_cmd", 10)
         self._speed_pub = node.create_publisher(
@@ -52,6 +54,29 @@ class ArmCommandPort:
         if reason:
             self._node.get_logger().info(
                 f"Published cart target, reason={reason}")
+
+    def publish_cart_waypoints(self, points: list[list[float]], frame_id: str = "base_link"):
+        if points is None or len(points) < 2:
+            raise ValueError("Cartesian waypoints require at least 2 points.")
+
+        msg = PoseArray()
+        msg.header.stamp = self._node.get_clock().now().to_msg()
+        msg.header.frame_id = frame_id or self._base_frame
+
+        for point in points:
+            if point is None or len(point) != 3:
+                raise ValueError("Each Cartesian waypoint must contain x, y, z.")
+            pose = Pose()
+            pose.position.x = float(point[0])
+            pose.position.y = float(point[1])
+            pose.position.z = float(point[2])
+            pose.orientation.x = 0.0
+            pose.orientation.y = 0.0
+            pose.orientation.z = 0.0
+            pose.orientation.w = 1.0
+            msg.poses.append(pose)
+
+        self._cart_waypoints_pub.publish(msg)
 
     # -- Gripper -------------------------------------------------------------
 
