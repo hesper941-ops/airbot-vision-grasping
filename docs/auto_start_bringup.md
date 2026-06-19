@@ -20,6 +20,45 @@ source /home/sunrise/robot/robot_ws/install/setup.bash
 ros2 launch robot_bringup service_robot_grasp_bringup.launch.py
 ```
 
+By default, `service_robot_grasp_bringup.launch.py` starts only the arm main
+chain:
+
+```text
+arm_executor_node
+grasp_task_open_loop
+```
+
+Run the manual `ros2 launch` command successfully before enabling systemd
+autostart for the first time.
+
+## Camera, Detector, and Transform Options
+
+The default `service-robot-grasp.service` sources only:
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/sunrise/robot/robot_ws/install/setup.bash
+```
+
+That is enough for the default arm main chain. If the site needs
+`enable_camera:=true` or `enable_detector:=true`, also source the Orbbec
+workspace before `robot_ws`:
+
+```bash
+source /home/sunrise/robot/Orbbec_ws/install/setup.bash
+```
+
+If this line is added to `deploy/systemd/service-robot-grasp.service`, confirm
+`/home/sunrise/robot/Orbbec_ws/install/setup.bash` exists on the robot. If the
+site has no `Orbbec_ws`, delete that line or keep the default service template.
+
+Before enabling camera-related launch options, confirm the actual site setup:
+
+- `Orbbec_ws` is built and sourceable.
+- The `detector` package provides `duck_detector_node`.
+- The transform script path matches `hand_to_eye/camera_to_base_transform.py`
+  on the robot.
+
 ## LLM or Mock Target Test
 
 The LLM or upper task module only needs to publish:

@@ -8,6 +8,10 @@ Requires=airbot-server.service
 Type=simple
 User=sunrise
 WorkingDirectory=/home/sunrise/robot/robot_ws
+# Default environment is for the arm main chain only:
+# arm_executor_node + grasp_task_open_loop.
+# If enable_camera:=true or enable_detector:=true is used on site, source
+# /home/sunrise/robot/Orbbec_ws/install/setup.bash before robot_ws too.
 ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source /home/sunrise/robot/robot_ws/install/setup.bash && ros2 launch robot_bringup service_robot_grasp_bringup.launch.py'
 Restart=on-failure
 
