@@ -103,3 +103,27 @@ ros2 topic echo /robot_arm/end_pose --once
 ros2 topic echo /robot_arm/joint_state --once
 ros2 topic echo /robot_arm/executor_status
 ```
+
+## Service robot one-command bringup / boot autostart
+
+Recommended ROS2 entrypoint:
+
+```bash
+ros2 launch robot_bringup service_robot_grasp_bringup.launch.py
+```
+
+`airbot_server` is still started separately, either manually or with systemd.
+It is not embedded in ROS2 launch.
+
+The LLM interface remains `/visual_target_base`
+(`robot_msgs/msg/VisualTarget`, `base_link`). LLM modules must not publish
+directly to `/robot_arm/cart_waypoints`; that topic is still an internal
+waypoint blend execution topic from `grasp_task_open_loop.py` to
+`arm_executor_node.py`.
+
+The waypoint blend approach is unchanged. The existing
+`open_loop_grasp.launch.py` remains available as the lower-level debug
+entrypoint.
+
+Autostart templates and installation notes are in
+`docs/auto_start_bringup.md`.

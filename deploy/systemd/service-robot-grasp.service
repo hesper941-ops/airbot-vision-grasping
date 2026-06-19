@@ -1,0 +1,15 @@
+[Unit]
+Description=Service robot ROS2 grasp bringup
+After=network-online.target airbot-server.service
+Wants=network-online.target
+Requires=airbot-server.service
+
+[Service]
+Type=simple
+User=sunrise
+WorkingDirectory=/home/sunrise/robot/robot_ws
+ExecStart=/bin/bash -lc 'source /opt/ros/humble/setup.bash && source /home/sunrise/robot/robot_ws/install/setup.bash && ros2 launch robot_bringup service_robot_grasp_bringup.launch.py'
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

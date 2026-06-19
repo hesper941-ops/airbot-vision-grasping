@@ -1,0 +1,13 @@
+[Unit]
+Description=AIRBOT CAN server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/airbot_server -i can1 -p 50001
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
