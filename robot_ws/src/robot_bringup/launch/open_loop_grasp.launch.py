@@ -28,11 +28,24 @@ def generate_launch_description():
         default_value=default_config,
         description='Open-loop grasp parameter YAML file',
     )
+    task_log_level_arg = DeclareLaunchArgument(
+        'task_log_level',
+        default_value='info',
+        description='ROS log level for grasp_task_open_loop',
+    )
+    executor_log_level_arg = DeclareLaunchArgument(
+        'executor_log_level',
+        default_value='warn',
+        description='ROS log level for arm_executor_node',
+    )
 
     arm_bringup = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(bringup_dir, 'launch', 'arm_bringup.launch.py')),
-        launch_arguments={'config_file': LaunchConfiguration('config_file')}.items(),
+        launch_arguments={
+            'config_file': LaunchConfiguration('config_file'),
+            'executor_log_level': LaunchConfiguration('executor_log_level'),
+        }.items(),
     )
 
     open_loop_node = Node(
@@ -41,10 +54,17 @@ def generate_launch_description():
         name='grasp_task_open_loop',
         output='screen',
         parameters=[LaunchConfiguration('config_file')],
+        arguments=[
+            '--ros-args',
+            '--log-level',
+            LaunchConfiguration('task_log_level'),
+        ],
     )
 
     return LaunchDescription([
         config_arg,
+        task_log_level_arg,
+        executor_log_level_arg,
         arm_bringup,
         open_loop_node,
     ])

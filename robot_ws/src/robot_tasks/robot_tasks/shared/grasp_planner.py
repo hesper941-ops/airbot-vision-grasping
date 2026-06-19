@@ -23,6 +23,10 @@ class GraspPlanner:
         self.final_grasp_clearance = float(config.get('final_grasp_clearance', 0.015))
         self.front_approach_x_offset = float(config.get('front_approach_x_offset', -0.10))
         self.front_approach_z_offset = float(config.get('front_approach_z_offset', 0.05))
+        self.adaptive_front_pre_grasp = bool(config.get('adaptive_front_pre_grasp', True))
+        self.workspace_soft_margin_m = float(config.get('workspace_soft_margin_m', 0.02))
+        self.min_front_pre_grasp_distance_m = float(
+            config.get('min_front_pre_grasp_distance_m', 0.04))
         self.front_grasp_x_offset = float(config.get('front_grasp_x_offset', 0.065))
         self.front_grasp_x_offset_max = float(config.get('front_grasp_x_offset_max', 0.075))
         self.min_safe_motion_z = float(config.get('min_safe_motion_z', 0.08))
@@ -47,6 +51,8 @@ class GraspPlanner:
         self.y_max = limits.get('y_max', 0.50)
         self.z_min = limits.get('z_min', 0.02)
         self.z_max = limits.get('z_max', 0.70)
+        self.last_attempted_pre_grasp = None
+        self.last_attempted_grasp = None
 
     def set_approach_mode(self, mode: str):
         mode = str(mode).strip().lower()
@@ -79,7 +85,7 @@ class GraspPlanner:
             ]
         elif self.approach_mode == 'front':
             waypoint = [
-                target[0] + self.front_approach_x_offset,
+                self._front_pre_grasp_x(target),
                 target[1],
                 max(target[2] + self.front_approach_z_offset, safe_z),
             ]
@@ -87,7 +93,8 @@ class GraspPlanner:
             raise ValueError(
                 f"Unsupported approach_mode={self.approach_mode!r}; expected top_down or front.")
 
-        return self.validate_waypoint(waypoint, is_final_grasp=False)
+        self.last_attempted_pre_grasp = list(waypoint)
+        return self.validate_waypoint(waypoint, is_final_grasp=False, label='pre_grasp')
 
     def compute_safe_grasp(self, target_xyz: list) -> list:
         """Return a final grasp waypoint that never goes below table clearance."""
@@ -96,7 +103,8 @@ class GraspPlanner:
         min_grasp_z = self.safe_motion_z if self.approach_mode == 'front' else self.final_grasp_z
         waypoint = self.compute_final_grasp_point(target)
         waypoint[2] = max(waypoint[2], min_grasp_z)
-        return self.validate_waypoint(waypoint, is_final_grasp=True)
+        self.last_attempted_grasp = list(waypoint)
+        return self.validate_waypoint(waypoint, is_final_grasp=True, label='grasp')
 
     def compute_final_grasp_point(self, target_xyz: list) -> list:
         """Return the final grasp point before workspace/radius validation."""
@@ -141,13 +149,18 @@ class GraspPlanner:
             max(current[2] + self.lift_z_offset, self.safe_motion_z),
         ], is_final_grasp=False)
 
-    def validate_waypoint(self, xyz: list, is_final_grasp: bool = False) -> list:
+    def validate_waypoint(
+        self,
+        xyz: list,
+        is_final_grasp: bool = False,
+        label: str = 'waypoint',
+    ) -> list:
         """Validate and clamp a waypoint while enforcing table clearance."""
-        point = self._validate_xyz(xyz, name='waypoint')
+        point = self._validate_xyz(xyz, name=label)
         min_z = self.final_grasp_z if is_final_grasp else self.safe_motion_z
         if point[2] < min_z:
             point[2] = min_z
-        self._validate_workspace(point, label='waypoint')
+        self._validate_workspace(point, label=label)
         return point
 
     def validate_approach_direction(self, current_xyz: list, target_xyz: list, mode=None):
@@ -217,6 +230,7 @@ class GraspPlanner:
         return math.radians(self.joint6_compensation_deg)
 
     def compute_joint6_target(self, current_joint_pos: list) -> Optional[list]:
+        # Deprecated for the open-loop main path. Kept for legacy/visual-servo compatibility.
         """Choose a safe J6 target from preferred offsets (±90°), excluding 0°.
 
         Candidates are j6_home + offset for each offset in j6_preferred_offsets_deg.
@@ -295,13 +309,30 @@ class GraspPlanner:
         """Return distance from the closest joint6 limit."""
         return min(value - self.joint6_min_rad, self.joint6_max_rad - value)
 
-    def _clamp(self, xyz: list) -> list:
-        """Clamp a Cartesian point into the configured workspace."""
-        return [
-            min(max(float(xyz[0]), self.x_min), self.x_max),
-            min(max(float(xyz[1]), self.y_min), self.y_max),
-            min(max(float(xyz[2]), self.z_min), self.z_max),
-        ]
+    def _front_pre_grasp_x(self, target: list) -> float:
+        raw_pre_x = float(target[0]) + self.front_approach_x_offset
+        if not self.adaptive_front_pre_grasp:
+            return raw_pre_x
+
+        lower = float(self.x_min) + self.workspace_soft_margin_m
+        upper = float(self.x_max) - self.workspace_soft_margin_m
+        if lower > upper:
+            raise ValueError(
+                'adaptive front pre_grasp soft bounds invalid: '
+                f'lower={lower:.3f}, upper={upper:.3f}, '
+                f'workspace_limits={self.workspace_limits}.')
+
+        pre_x = min(max(raw_pre_x, lower), upper)
+        distance = float(target[0]) - pre_x
+        if distance < self.min_front_pre_grasp_distance_m:
+            raise ValueError(
+                'front pre_grasp unavailable after adaptive offset: '
+                f'target_x={float(target[0]):.3f}, raw_pre_x={raw_pre_x:.3f}, '
+                f'adjusted_pre_x={pre_x:.3f}, target_x-pre_x={distance:.3f}, '
+                f'min_front_pre_grasp_distance_m={self.min_front_pre_grasp_distance_m:.3f}, '
+                f'workspace_soft_bounds=[{lower:.3f}, {upper:.3f}], '
+                f'front_approach_x_offset={self.front_approach_x_offset:.3f}.')
+        return pre_x
 
     def _validate_workspace(self, xyz: list, label: str = 'waypoint'):
         for index, value in enumerate(xyz):

@@ -1,22 +1,23 @@
 # robot_ws
 
-AIRBOT Play 机械臂侧 ROS 2 工作区。
+AIRBOT Play 机械臂侧 ROS 2 工作区。当前主线是 AIRBOT Play 机械臂 + Orbbec 相机的 open_loop 连续 waypoint 抓取。
 
-主链路中，`arm_executor_node` 是唯一调用 AIRBOT SDK 的节点。它发布 `/robot_arm/end_pose`、`/robot_arm/joint_state` 和 `/robot_arm/executor_status`，并接收任务节点发来的运动、夹爪和速度命令。
+主链路中，`arm_executor_node` 是唯一直接调用 AIRBOT SDK 的节点。`grasp_task_open_loop` 只发布运动、夹爪、速度和恢复命令，不直接访问 AIRBOT SDK。
 
 ## 主链路
 
 ```text
 /visual_target_base
--> grasp_task_open_loop
--> /robot_arm/cart_target、/robot_arm/target_joint、/robot_arm/gripper_cmd
--> arm_executor_node
--> AIRBOT SDK
+  -> grasp_task_open_loop
+  -> /robot_arm/cart_target
+  -> /robot_arm/target_joint
+  -> /robot_arm/gripper_cmd
+  -> /robot_arm/speed_profile
+  -> arm_executor_node
+  -> AIRBOT SDK
 ```
 
-`/visual_target_base` 由 `hand_to_eye/camera_to_base_transform.py` 发布。该脚本需要同时 source `robot_ws`，否则 `robot_msgs/msg/VisualTarget` 不可见。
-
-不要在主链路中启动 `hand_to_eye/end_position_publisher.py`。它会直接连接 AIRBOT SDK，只能用于旧调试链路。
+`/visual_target_base` 由 `hand_to_eye/camera_to_base_transform.py` 发布，坐标必须已经在 `base_link` 下。不要在主链路中启动 `hand_to_eye/end_position_publisher.py`，它会直接连接 AIRBOT SDK，只能用于旧调试链路。
 
 ## 编译
 
@@ -29,23 +30,27 @@ source install/setup.bash
 
 ## 启动
 
-终端 0：
+先启动 AIRBOT server：
 
 ```bash
 sudo airbot_server -i can1 -p 50001
 ```
 
-> **注意：** 在确认 `airbot_server` 已在端口 50001 正常监听之前，不要启动终端 1 的 `open_loop_grasp.launch.py`。否则 `arm_executor_node` 会因无法连接 AIRBOT SDK 而持续报错。
+确认 50001 已监听：
 
-终端 1：
+```bash
+sudo ss -lntp | grep 50001
+```
+
+再启动 open_loop 抓取：
 
 ```bash
 source /opt/ros/humble/setup.bash
 source /home/sunrise/robot/robot_ws/install/setup.bash
-ros2 launch robot_bringup open_loop_grasp.launch.py
+ros2 launch robot_bringup open_loop_grasp.launch.py task_log_level:=info executor_log_level:=warn
 ```
 
-终端 2（视觉坐标桥）：
+视觉坐标桥另开终端：
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -53,16 +58,6 @@ source /home/sunrise/robot/Orbbec_ws/install/setup.bash
 source /home/sunrise/robot/robot_ws/install/setup.bash
 python3 /home/sunrise/robot/hand_to_eye/camera_to_base_transform.py
 ```
-
-## AIRBOT server 检查
-
-启动 `open_loop_grasp.launch.py` 前，必须先确认 `airbot_server` 监听 50001：
-
-```bash
-sudo ss -lntp | grep 50001
-```
-
-如果没有 `LISTEN`，不要启动 `open_loop_grasp.launch.py`，因为 `arm_executor_node` 会连接失败并报 `Not connected to the server`。
 
 ## Topic
 
@@ -81,130 +76,148 @@ sudo ss -lntp | grep 50001
 - `/robot_arm/speed_profile` (`std_msgs/msg/String`)
 - `/robot_arm/reset_executor` (`std_msgs/msg/String`)
 
-`arm_executor_node` 额外支持结构化夹爪命令：
-
-- `/robot_arm/gripper_command` (`robot_msgs/msg/GripperCommand`)
-
-当前 `grasp_task_open_loop` 仍使用兼容的 String 版本 `/robot_arm/gripper_cmd`。后续需要使用视觉估计夹爪宽度时，可以切换到 `/robot_arm/gripper_command`。
-
 执行器状态包括：
 
 - `IDLE`
 - `BUSY`
 - `DONE`
 - `ERROR`
+- `TIMEOUT`
 - `REJECTED_BUSY`
 - `REJECTED_INVALID_JOINT_LIMIT`
 
-## 状态机
+## Open Loop 状态机
+
+当前主流程：
 
 ```text
-IDLE
-  -> WAIT_PRE_TARGET      (等待第一个稳定视觉目标，不会超时进入 RECOVER)
-  -> SET_GRIPPER_ORIENTATION  (J6 ±90° 旋转补偿)
-  -> MOVE_PRE_GRASP       (分段移动到预抓取点)
-  -> MOVE_GRASP           (分段下降到抓取点)
+WAIT_PRE_TARGET
+  -> PRE_OPEN_GRIPPER
+  -> MOVE_PRE_GRASP
+  -> MOVE_GRASP
   -> CLOSE_GRIPPER
-  -> MOVE_LIFT            (分段抬升)
-  -> MOVE_RETREAT         (分段返回 safe_pose)
-  -> IDLE
+  -> MOVE_LIFT
+  -> RETURN_INIT_POSE
 ```
 
-`require_second_visual_confirm=true` 时，`MOVE_PRE_GRASP` 和 `MOVE_GRASP` 之间会额外启用 `WAIT_GRASP_TARGET` 二次视觉确认。
+`require_second_visual_confirm=true` 时，`MOVE_PRE_GRASP` 和 `MOVE_GRASP` 之间会额外进入 `WAIT_GRASP_TARGET` 做二次视觉确认。
 
-异常统一进入：
+当前相机安装位置下，open_loop 不再进入 `SET_GRIPPER_ORIENTATION`，抓取前不再发布 J6 补偿 joint target。
+
+## J6 策略
+
+当前 open_loop 初始/回位关节角：
 
 ```text
-RECOVER -> clear_error (周期重发) -> open gripper -> vertical lift -> move safe_pose (分段) -> IDLE
+[0.0, -45.0, 110.0, -90.0, 90.0, 0.0]
 ```
 
-如果底层 AIRBOT SDK 报 `move group planning PTP failed`、`gRPC error`、`planning failed`、`motion failed` 等运动失败，`airbot_wrapper` 会抛出异常，`arm_executor_node` 发布 `/robot_arm/executor_status=ERROR`。任务层收到 `ERROR` 后进入 `RECOVER`，不会把失败动作标记成 `DONE`。
+也就是说，J6 初始/回位角为 `0 deg`。
 
-## 眼在手上抓取策略
+`GraspPlanner.compute_joint6_target()` 仍作为 visual_servo/旧流程兼容 helper 保留，但不参与 open_loop 主流程。
 
-当前默认采用 `top_down` 上方抓取。机械臂只允许从物块上方或前方靠近，禁止从物块下方靠近，以避免打到桌面。
+## 抓取前预规划
 
-分段靠近过程中，如果 `/visual_target_base` 持续更新，`grasp_task_open_loop` 会持续更新 `base_link` 下的 active target。若目标短暂离开相机视野，则使用 `last_seen_target_base` 继续执行。若 `last_seen_target_base` 超过 `last_seen_target_max_age_sec`，或路径低于桌面安全高度，则进入 `RECOVER`。
+`WAIT_PRE_TARGET` 收到稳定目标后，不会立即打开夹爪。任务节点会先按 `approach_priority` 做完整预规划检查：
 
-## 眼在手上 last-seen fallback 抓取策略
+- 检查目标点 `target_base`
+- 生成并检查 `pre_grasp`
+- 生成并检查 `grasp`
+- 生成并检查 `lift_goal`
+- 检查 workspace 和官方 reach radius
 
-分段靠近过程（`MOVE_PRE_GRASP`、`MOVE_GRASP`）中，目标可能因为相机视角变化而短暂离开视野。为应对这一问题，任务层实现了 last-seen fallback。
+只有至少一个 approach mode 成功规划，才进入 `PRE_OPEN_GRIPPER`。如果所有 mode 都失败，夹爪保持当前状态，任务停留在 `WAIT_PRE_TARGET` 等待新的稳定目标，并输出 workspace 拒绝原因。
 
-### 行为
+默认优先级：
 
-- 如果 `/visual_target_base` 持续更新（即 detector 持续检测到目标），任务节点持续更新 `active_target_base`，每次分段都使用最新的 `base_link` 坐标。
-- 如果目标短暂离开相机视野，任务节点使用 `last_seen_target_base`（最后一次真实检测到目标的 `base_link` 坐标）继续分段靠近。
-- 如果超过 `last_seen_target_max_age_sec`（默认 5 s）仍没有新目标到达，状态机进入 `RECOVER`，避免盲抓。
-- 运动过程中如果新目标相对 `active_target_base` 跳变超过 `max_target_jump_m` 或 `max_target_z_jump_m`，任务层会拒绝这次更新，避免 last-seen 目标被明显异常的视觉点污染。
+```yaml
+approach_priority: ["front", "top_down"]
+```
 
-### 职责划分
+front 失败时会尝试 top_down；全部失败才作为最终拒绝。
 
-- **视觉桥接层** `hand_to_eye/camera_to_base_transform.py` 只发布真实 detector 输入产生的新 `/visual_target_base`。不 republish 旧目标、不伪造旧坐标。
-- **任务层** `robot_tasks/grasp_task_open_loop.py` 订阅 `/visual_target_base`，维护 `last_seen_target_base` 和 `active_target_base`，在目标短暂丢失时自行 fallback。
-- 视觉层仅提供 `no_recent_detector_target` 和 `target_timeout` warning 用于健康监控，不参与抓取决策。
+## Front Pre-Grasp 自适应
 
-### 相关参数（任务层）
+front 模式下，预抓取点原始计算为：
 
-- `use_last_seen_target_on_loss`（默认 `true`）：目标丢失时是否启用 last-seen fallback。
-- `visual_lost_grace_sec`（默认 `0.5` s）：短于此时间的目标丢失视为瞬时遮挡，不打印 warning。
-- `last_seen_target_max_age_sec`（默认 `5.0` s）：last-seen 目标的最大有效年龄。超过后 `_get_active_target_or_last_seen()` 返回 `None`，触发 `RECOVER`。
-- `update_target_during_motion`（默认 `true`）：分段靠近过程中是否根据新到达的 `/visual_target_base` 更新 `active_target_base`。
-- `freeze_target_before_close`（默认 `true`）：夹爪闭合前冻结 `active_target_base`，避免闭合瞬间目标坐标跳动。
+```text
+raw_pre_x = target_x + front_approach_x_offset
+```
 
-## 抓取方向与桌面安全约束
+为避免近距离目标因为固定 `front_approach_x_offset=-0.10` 导致 `pre_grasp.x < workspace_limits.x_min`，当前启用自适应预抓取：
 
-**抓取策略概要：** 当前默认采用 `top_down` 上方抓取，禁止从物块下方靠近。视觉可见时持续更新目标坐标；目标短暂丢失时使用 `last_seen_target_base` 继续执行；如果 last-seen 超时（`last_seen_target_max_age_sec`）或路径低于桌面安全高度，状态机进入 `RECOVER`，避免盲抓或碰撞桌面。
+```yaml
+adaptive_front_pre_grasp: true
+workspace_soft_margin_m: 0.02
+min_front_pre_grasp_distance_m: 0.04
+```
 
-当前默认采用 `top_down` 上方抓取。机械臂靠近物块时，只允许从上方或前方靠近；禁止从物块下方或低于桌面安全高度的路径靠近，以避免打到桌子。
+逻辑：
 
-`GraspPlanner` 会根据 `approach_mode` 生成安全 waypoint：
+- 如果 `raw_pre_x` 在 workspace 软边界内，直接使用。
+- 如果 `raw_pre_x` 越过软边界，先把 `pre_x` 调整到软边界内。
+- 调整后仍必须满足 `target_x - pre_x >= min_front_pre_grasp_distance_m`。
+- 如果不满足，front mode 被拒绝，状态机继续尝试 top_down。
+- 最终 `grasp` 点不会被静默 clamp；抓取点越界仍会明确报错。
 
-- `top_down`：`pre_grasp` 位于目标正上方，`MOVE_GRASP` 主要做竖直下降。
-- `front`：`pre_grasp` 位于目标前方，并保持 `front_approach_z_offset` 和桌面安全高度。
-- 普通中间 waypoint 的 z 不低于 `table_z + table_clearance` 和 `min_safe_motion_z`。
-- 最终抓取点的 z 不低于 `table_z + final_grasp_clearance`。
-- 如果当前末端低于安全高度，任务层会先原地竖直抬升，再横向移动到预抓取点或安全撤退点。
+## Workspace 拒绝日志
 
-如果 `reject_target_below_table=true` 且目标 z 低于 `table_z`，planner 会拒绝该目标并触发恢复流程。当前配置临时收窄工作空间，避免太靠边导致保持姿态的 PTP/笛卡尔规划失败；后续标定和路径验证稳定后再放宽。
+workspace 拒绝日志会尽量说明：
 
-## Cartesian 分段运动
+- 哪个点越界：`target_base`、`pre_grasp`、`grasp`、`lift_goal`、`retreat_goal`
+- 哪个轴越界：`x`、`y`、`z`
+- 当前 `target_base`
+- 尝试的 `pre_grasp`
+- 尝试的 `grasp`
+- 当前末端 `end_pose`
+- `workspace_limits`
+- `approach_mode`
+- `front_approach_x_offset`
 
-所有 Cartesian 阶段都自动按 `max_cartesian_step`（默认 0.08 m）分段。每次只发布一小步，到位并停稳后才发下一步，绝不直接发送最终目标。
+如果实机确认某个区域可达，再调整 YAML 里的 `workspace_limits`。不要通过静默放宽或 clamp 最终抓取点来掩盖真实不可达问题。
 
-`max_cartesian_step` 必须小于 AirbotWrapper 的 0.100 m 单步安全限制。
+## 日志参数
 
-受影响的阶段：`MOVE_PRE_GRASP`、`MOVE_GRASP`、`MOVE_LIFT`、`MOVE_RETREAT`、`RECOVER_RETREAT`。
+open_loop 任务节点：
 
-## WAIT_PRE_TARGET 行为
+```yaml
+verbose_debug: false
+status_log_period_sec: 2.0
+log_waypoint_each_step: false
+```
 
-`WAIT_PRE_TARGET` 是等待第一个视觉目标的阶段，机械臂尚未开始运动。**没有目标时不会触发 RECOVER**，只会周期性 warning（默认 15 s），清空旧目标窗口，并持续等待 `/visual_target_base`。
+launch 支持：
 
-默认流程不再强制进入 `WAIT_GRASP_TARGET`。启用 `require_second_visual_confirm` 后，`WAIT_GRASP_TARGET`（到达 pre-grasp 后的二次确认）目标丢失**会**进入 RECOVER，因为机械臂已离开安全位姿。
+```bash
+ros2 launch robot_bringup open_loop_grasp.launch.py task_log_level:=info executor_log_level:=warn
+```
 
-## REJECTED_BUSY
+默认 INFO 只保留关键流程：
 
-单次 `REJECTED_BUSY` 不立即触发 RECOVER。连续达到 `rejected_busy_recover_threshold`（默认 2）后才进入。executor 回到 `IDLE`/`DONE`、任务状态切换、或成功发布命令后计数器清零。
+- 节点启动参数摘要
+- 状态切换，例如 `[GRASP] WAIT_PRE_TARGET -> PRE_OPEN_GRIPPER`
+- 稳定目标
+- 选中的 `approach_mode`
+- 固定的 `pre_grasp` / `grasp` / `lift_goal`
+- 开夹爪、闭夹爪
+- 抓取成功、返回初始位、RECOVER 原因
 
-## RECOVER 中 clear_error 周期重发
-
-executor 处于 `ERROR` 时，每 0.5 s 重复发布 `clear_error`，直到 ERROR 清除，避免"只发一次但 executor 未收到"。
+每个 waypoint step、每次 publish 的详细 reason、安全检查细节默认在 DEBUG，或由 `verbose_debug` / `log_waypoint_each_step` 打开。
 
 ## 关节限位保护
 
-`arm_executor_node` 对所有 `/robot_arm/target_joint` 做全关节限位检查。超限的 joint target 被拒绝并发布 `REJECTED_INVALID_JOINT_LIMIT`，**不自动 clamp**（clamp 仅用于 Cartesian waypoint 的工作空间裁剪）。
+`arm_executor_node` 对所有 `/robot_arm/target_joint` 做全关节限位检查。超限的 joint target 会被拒绝并发布 `REJECTED_INVALID_JOINT_LIMIT`，不会自动 clamp。
 
-保守 AIRBOT Play 限位（确认真实硬件后可放宽）：
+保守 AIRBOT Play 限位：
 
 | 关节 | 角度范围 | 弧度范围 |
-|------|----------|----------|
-| J1 | [-180°, +120°] | [-3.1416, +2.0944] |
-| J2 | [-170°, +10°] | [-2.9671, +0.1745] |
-| J3 | [-5°, +180°] | [-0.0873, +3.1416] |
-| J4 | [-148°, +148°] | [-2.5831, +2.5831] |
-| J5 | [-100°, +100°] | [-1.7453, +1.7453] |
-| J6 | [-170°, +170°] | [-2.9671, +2.9671] |
-
-J6 方向选择：`GraspPlanner.compute_joint6_target()` 同时检测 +90° 和 -90° 两个候选方向，只使用在限位内的方向。都不合法时返回 None，状态机进入 RECOVER。
+| --- | --- | --- |
+| J1 | [-180 deg, +120 deg] | [-3.1416, +2.0944] |
+| J2 | [-170 deg, +10 deg] | [-2.9671, +0.1745] |
+| J3 | [-5 deg, +180 deg] | [-0.0873, +3.1416] |
+| J4 | [-148 deg, +148 deg] | [-2.5831, +2.5831] |
+| J5 | [-100 deg, +100 deg] | [-1.7453, +1.7453] |
+| J6 | [-170 deg, +170 deg] | [-2.9671, +2.9671] |
 
 ## 最小验证
 
@@ -215,44 +228,47 @@ ros2 topic echo /robot_arm/executor_status
 ros2 topic echo /visual_target_base --once
 ```
 
-如果 `/visual_target_base` 有数据但机械臂不动，优先检查：
+实机重点看：
 
-- `airbot_server`
-- CAN 口，例如 `can1`
-- `arm_executor_node`
-- `/robot_arm/executor_status`
+- 启动后 `arm_executor_node` 初始位 J6 是否为 `0 deg`
+- 抓取前是否不再出现 `SET_GRIPPER_ORIENTATION`
+- 抓取前是否不再发布 J6 补偿 joint target
+- 近距离目标是否先完成预规划，再打开夹爪
+- front 预抓取越界时是否自适应调整，或 fallback 到 top_down
+- workspace 拒绝日志是否能看出具体点、轴和参数
+- launch 窗口是否只显示关键流程，而不是刷大量 waypoint INFO
 
 ## 手动测试
 
-发布假稳定目标（测试状态机）：
+发布假稳定目标：
 
 ```bash
 ros2 topic pub -r 10 /visual_target_base robot_msgs/msg/VisualTarget \
 "{header: {frame_id: 'base_link'}, x: 0.35, y: 0.0, z: 0.12, confidence: 0.90, depth: 0.12, image_width: 640, image_height: 480}"
 ```
 
-Cartesian 目标：
+发布 Cartesian 目标：
 
 ```bash
 ros2 topic pub --once /robot_arm/cart_target geometry_msgs/msg/PointStamped \
 "{header: {frame_id: 'base_link'}, point: {x: 0.35, y: 0.0, z: 0.35}}"
 ```
 
-合法 joint target：
+发布合法 joint target：
 
 ```bash
 ros2 topic pub --once /robot_arm/target_joint std_msgs/msg/Float64MultiArray \
-"{data: [0.0, -0.785, 2.094, -1.571, 1.571, 1.571]}"
+"{data: [0.0, -0.785, 2.094, -1.571, 1.571, 0.0]}"
 ```
 
-非法 joint target（J2=1.0 > 0.1745，期望被拒绝 `REJECTED_INVALID_JOINT_LIMIT`）：
+发布非法 joint target，期望被拒绝为 `REJECTED_INVALID_JOINT_LIMIT`：
 
 ```bash
 ros2 topic pub --once /robot_arm/target_joint std_msgs/msg/Float64MultiArray \
-"{data: [0.0, 1.0, 2.094, -1.571, 1.571, 1.571]}"
+"{data: [0.0, 1.0, 2.094, -1.571, 1.571, 0.0]}"
 ```
 
-速度 / 夹爪 / clear_error：
+速度、夹爪、clear_error：
 
 ```bash
 ros2 topic pub --once /robot_arm/speed_profile std_msgs/msg/String "{data: 'slow'}"

@@ -30,7 +30,7 @@ arm_executor_node:
     do_init: true
 
     # 初始关节位姿 (degree).
-    init_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 90.0]
+    init_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 0.0]
 
     # ------------------------------------------------------------------
     # [1.2] 关节限位 (rad)
@@ -93,7 +93,7 @@ grasp_task_open_loop:
     approach_priority: ["front", "top_down"]
     front_first_then_top_down: true
     max_approach_mode_retries: 1
-    blend_approach_enabled: true
+    blend_approach_enabled: false
     blend_approach_fallback_to_sequential: true
 
     # 预抓取 / 抓取 / 抬升 / 前方靠近偏移量 (meter).
@@ -102,6 +102,9 @@ grasp_task_open_loop:
     lift_z_offset: 0.12
     front_approach_x_offset: -0.10
     front_approach_z_offset: 0.05
+    adaptive_front_pre_grasp: true
+    workspace_soft_margin_m: 0.02
+    min_front_pre_grasp_distance_m: 0.04
     front_grasp_x_offset: 0.065
     front_grasp_x_offset_max: 0.075
 
@@ -111,18 +114,14 @@ grasp_task_open_loop:
     # J6 home 仅用于 init/recover, 不用作抓取姿态.
     # Unit: degree / rad.
     # ==================================================================
-    joint6_compensation_deg: 90.0
-
     joint6_min_rad: -2.9671
     joint6_max_rad: 2.9671
 
-    j6_home_deg: 90.0
+    j6_home_deg: 0.0
     j6_allowed_delta_deg: 90.0
 
     # 抓取前只允许 home ± 这些 offset.
     # 0° offset 被排除 —— 抓取姿态必须旋转 ±90°.
-    j6_preferred_offsets_deg: [90.0, -90.0]
-
     forbid_camera_upside_down: true
     return_j6_to_home_on_recover: true
 
@@ -145,6 +144,8 @@ grasp_task_open_loop:
       y_max: 0.35
       z_min: 0.02
       z_max: 0.70
+    # If real-machine tests confirm additional reachable area, tune these
+    # workspace_limits here. The planner does not silently clamp final grasp.
 
     # ==================================================================
     # [2.7] Gripper policy (夹爪策略)
@@ -159,7 +160,7 @@ grasp_task_open_loop:
     keep_gripper_closed_after_grasp: true
 
     # 抓取后回初始关节位姿 (degree).
-    final_init_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 90.0]
+    final_init_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 0.0]
     return_init_timeout_sec: 10.0
 
     # ==================================================================
@@ -294,3 +295,6 @@ grasp_task_open_loop:
     # [2.14] Main loop
     # ==================================================================
     loop_hz: 4.0
+    verbose_debug: false
+    status_log_period_sec: 2.0
+    log_waypoint_each_step: false

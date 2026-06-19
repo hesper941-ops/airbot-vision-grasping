@@ -31,6 +31,20 @@ class ArmCommandPort:
         self._reset_pub = node.create_publisher(
             String, "/robot_arm/reset_executor", 10)
 
+    def _debug_or_info(self, message: str):
+        verbose = False
+        try:
+            verbose = (
+                self._node.has_parameter('verbose_debug')
+                and bool(self._node.get_parameter('verbose_debug').value)
+            )
+        except Exception:
+            verbose = False
+        if verbose:
+            self._node.get_logger().info(message)
+        else:
+            self._node.get_logger().debug(message)
+
     # -- Joint target --------------------------------------------------------
 
     def publish_joint_target(self, joint_pos, reason: str = ""):
@@ -38,8 +52,7 @@ class ArmCommandPort:
         msg.data = [float(v) for v in joint_pos]
         self._joint_pub.publish(msg)
         if reason:
-            self._node.get_logger().info(
-                f"Published joint target, reason={reason}")
+            self._debug_or_info(f"Published joint target, reason={reason}")
 
     # -- Cartesian target ----------------------------------------------------
 
@@ -52,8 +65,7 @@ class ArmCommandPort:
         msg.point.z = float(xyz[2])
         self._cart_pub.publish(msg)
         if reason:
-            self._node.get_logger().info(
-                f"Published cart target, reason={reason}")
+            self._debug_or_info(f"Published cart target, reason={reason}")
 
     def publish_cart_waypoints(self, points: list[list[float]], frame_id: str = "base_link"):
         if points is None or len(points) < 2:
@@ -85,8 +97,7 @@ class ArmCommandPort:
         msg.data = command
         self._gripper_pub.publish(msg)
         if reason:
-            self._node.get_logger().info(
-                f"Published gripper command={command}, reason={reason}")
+            self._debug_or_info(f"Published gripper command={command}, reason={reason}")
 
     # -- Speed profile -------------------------------------------------------
 
@@ -95,8 +106,7 @@ class ArmCommandPort:
         msg.data = profile
         self._speed_pub.publish(msg)
         if reason:
-            self._node.get_logger().info(
-                f"Published speed_profile={profile}, reason={reason}")
+            self._debug_or_info(f"Published speed_profile={profile}, reason={reason}")
 
     # -- Reset / clear-error -------------------------------------------------
 

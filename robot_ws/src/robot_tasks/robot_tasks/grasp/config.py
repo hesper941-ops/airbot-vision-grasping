@@ -93,7 +93,7 @@ class GraspTaskConfig:
     approach_priority: List[str] = field(default_factory=lambda: ["front", "top_down"])
     front_first_then_top_down: bool = True
     max_approach_mode_retries: int = 1
-    blend_approach_enabled: bool = True
+    blend_approach_enabled: bool = False
     blend_approach_fallback_to_sequential: bool = True
 
     # Geometry (meters)
@@ -102,6 +102,9 @@ class GraspTaskConfig:
     lift_z_offset: float = 0.12
     front_approach_x_offset: float = -0.10
     front_approach_z_offset: float = 0.05
+    adaptive_front_pre_grasp: bool = True
+    workspace_soft_margin_m: float = 0.02
+    min_front_pre_grasp_distance_m: float = 0.04
     front_grasp_x_offset: float = 0.065
     front_grasp_x_offset_max: float = 0.075
 
@@ -115,9 +118,9 @@ class GraspTaskConfig:
     official_reach_radius_m: float = 0.647
 
     workspace_x_min: float = 0.10
-    workspace_x_max: float = 0.65
-    workspace_y_min: float = -0.35
-    workspace_y_max: float = 0.35
+    workspace_x_max: float = 1.00
+    workspace_y_min: float = -0.45
+    workspace_y_max: float = 0.50
     workspace_z_min: float = 0.02
     workspace_z_max: float = 0.70
 
@@ -125,7 +128,7 @@ class GraspTaskConfig:
     joint6_compensation_deg: float = 90.0
     joint6_min_rad: float = -2.9671
     joint6_max_rad: float = 2.9671
-    j6_home_deg: float = 90.0
+    j6_home_deg: float = 0.0
     j6_allowed_delta_deg: float = 90.0
     j6_preferred_offsets_deg: List[float] = field(
         default_factory=lambda: [90.0, -90.0])
@@ -140,7 +143,7 @@ class GraspTaskConfig:
     return_to_init_after_grasp: bool = True
     keep_gripper_closed_after_grasp: bool = True
     final_init_joint_pos_deg: List[float] = field(
-        default_factory=lambda: [0.0, -45.0, 110.0, -90.0, 90.0, 90.0])
+        default_factory=lambda: [0.0, -45.0, 110.0, -90.0, 90.0, 0.0])
     return_init_timeout_sec: float = 10.0
 
     # -- Motion control ------------------------------------------------------
@@ -199,9 +202,9 @@ class GraspTaskConfig:
 
         # -- Workspace sub-keys ------------------------------------------
         wx_min = _pf("workspace_limits.x_min", 0.10)
-        wx_max = _pf("workspace_limits.x_max", 0.65)
-        wy_min = _pf("workspace_limits.y_min", -0.35)
-        wy_max = _pf("workspace_limits.y_max", 0.35)
+        wx_max = _pf("workspace_limits.x_max", 1.00)
+        wy_min = _pf("workspace_limits.y_min", -0.45)
+        wy_max = _pf("workspace_limits.y_max", 0.50)
         wz_min = _pf("workspace_limits.z_min", 0.02)
         wz_max = _pf("workspace_limits.z_max", 0.70)
 
@@ -243,7 +246,7 @@ class GraspTaskConfig:
             approach_priority=list(_p("approach_priority", ["front", "top_down"])),
             front_first_then_top_down=_pb("front_first_then_top_down", True),
             max_approach_mode_retries=_pi("max_approach_mode_retries", 1),
-            blend_approach_enabled=_pb("blend_approach_enabled", True),
+            blend_approach_enabled=_pb("blend_approach_enabled", False),
             blend_approach_fallback_to_sequential=_pb(
                 "blend_approach_fallback_to_sequential", True),
 
@@ -252,6 +255,9 @@ class GraspTaskConfig:
             lift_z_offset=_pf("lift_z_offset", 0.12),
             front_approach_x_offset=_pf("front_approach_x_offset", -0.10),
             front_approach_z_offset=_pf("front_approach_z_offset", 0.05),
+            adaptive_front_pre_grasp=_pb("adaptive_front_pre_grasp", True),
+            workspace_soft_margin_m=_pf("workspace_soft_margin_m", 0.02),
+            min_front_pre_grasp_distance_m=_pf("min_front_pre_grasp_distance_m", 0.04),
             front_grasp_x_offset=_pf("front_grasp_x_offset", 0.065),
             front_grasp_x_offset_max=_pf("front_grasp_x_offset_max", 0.075),
 
@@ -270,7 +276,7 @@ class GraspTaskConfig:
             joint6_compensation_deg=_pf("joint6_compensation_deg", 90.0),
             joint6_min_rad=_pf("joint6_min_rad", -2.9671),
             joint6_max_rad=_pf("joint6_max_rad", 2.9671),
-            j6_home_deg=_pf("j6_home_deg", 90.0),
+            j6_home_deg=_pf("j6_home_deg", 0.0),
             j6_allowed_delta_deg=_pf("j6_allowed_delta_deg", 90.0),
             j6_preferred_offsets_deg=_plf("j6_preferred_offsets_deg", [90.0, -90.0]),
             forbid_camera_upside_down=_pb("forbid_camera_upside_down", True),
@@ -282,7 +288,7 @@ class GraspTaskConfig:
             gripper_settle_sec=_pf("gripper_settle_sec", 1.0),
             return_to_init_after_grasp=_pb("return_to_init_after_grasp", True),
             keep_gripper_closed_after_grasp=_pb("keep_gripper_closed_after_grasp", True),
-            final_init_joint_pos_deg=_plf("final_init_joint_pos_deg", [0.0, -45.0, 110.0, -90.0, 90.0, 90.0]),
+            final_init_joint_pos_deg=_plf("final_init_joint_pos_deg", [0.0, -45.0, 110.0, -90.0, 90.0, 0.0]),
             return_init_timeout_sec=_pf("return_init_timeout_sec", 10.0),
 
             max_cartesian_step=_pf("max_cartesian_step", 0.08),

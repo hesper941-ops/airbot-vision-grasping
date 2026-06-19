@@ -42,8 +42,9 @@ class ArmExecutorNode(Node):
         self.declare_parameter('do_init', True)
         self.declare_parameter(
             'init_joint_pos_deg',
-            [0.0, -45.0, 120.0, -90.0, 90.0, 90.0],
+            [0.0, -45.0, 110.0, -90.0, 90.0, 0.0],
         )
+        self.declare_parameter('verbose_log', False)
 
         # Conservative AIRBOT Play joint limits.
         # Confirm the exact hardware model before widening these values.
@@ -84,7 +85,9 @@ class ArmExecutorNode(Node):
         with self.sdk_lock:
             self.arm.set_speed_profile('default')
         self.get_logger().info(
-            'Arm initialized; executor is ready and speed profile is default.')
+            'ArmExecutorNode ready: init_joint_pos_deg='
+            f'{list(self.get_parameter("init_joint_pos_deg").value)}, '
+            'speed_profile=default.')
 
         self.state_timer = self.create_timer(0.1, self.publish_state)
 
@@ -131,18 +134,10 @@ class ArmExecutorNode(Node):
             10,
         )
 
-        self.get_logger().info(
-            'ArmExecutorNode started. Listening on /robot_arm/target_joint, '
-            '/robot_arm/cart_target, /robot_arm/cart_waypoints, '
-            '/robot_arm/gripper_cmd, /robot_arm/gripper_command, '
-            '/robot_arm/speed_profile, '
-            '/robot_arm/reset_executor.')
-        self.get_logger().info(
-            'Publishing /robot_arm/joint_state, /robot_arm/end_pose, '
-            '/robot_arm/executor_status.')
-        self.get_logger().info(
-            'Joint limits active: all 6 joints checked; '
-            'targets exceeding limits are rejected without automatic clamping.')
+        self._debug_or_info(
+            'ArmExecutorNode topics ready: target_joint, cart_target, cart_waypoints, '
+            'gripper_cmd, gripper_command, speed_profile, reset_executor; '
+            'publishing joint_state, end_pose, executor_status.')
 
     # ------------------------------------------------------------------
     # Joint limit helpers
@@ -223,7 +218,7 @@ class ArmExecutorNode(Node):
             self._publish_executor_status(self.ERROR)
             return
 
-        self.get_logger().info(
+        self._debug_or_info(
             f'Moving to init joint pose deg={[float(v) for v in deg]}')
         try:
             with self.sdk_lock:
@@ -231,7 +226,7 @@ class ArmExecutorNode(Node):
                 self.arm.get_state()
                 self.arm.move_joints(rad)
                 self._publish_executor_status(self.DONE)
-            self.get_logger().info('Init pose reached.')
+            self._debug_or_info('Init pose reached.')
         except Exception as exc:
             self._set_error(f'Init pose failed: {exc}')
         finally:
@@ -404,7 +399,7 @@ class ArmExecutorNode(Node):
             return
 
         count = len(msg.poses)
-        self.get_logger().info(f'cart_waypoints received: n={count}')
+        self._debug_or_info(f'cart_waypoints received: n={count}')
         if count < 2:
             self.get_logger().error(
                 f'Invalid cart_waypoints count: {count} (expected >= 2).')
@@ -463,7 +458,7 @@ class ArmExecutorNode(Node):
 
         with self.status_lock:
             if self.executor_state != self.ERROR:
-                self.get_logger().info(
+                self._debug_or_info(
                     f'clear_error received while executor is {self.executor_state}; no state change.')
                 self._publish_executor_status_locked(self.executor_state)
                 return
@@ -491,10 +486,10 @@ class ArmExecutorNode(Node):
                 return
 
             self.executor_state = self.BUSY
-            self.get_logger().info(f'Executor status: BUSY {command_type}')
+            self._debug_or_info(f'Executor status: BUSY {command_type}')
             self._publish_executor_status_locked(self.BUSY)
 
-        self.get_logger().info(f'Start {command_type} command: {payload}')
+        self._debug_or_info(f'Start {command_type} command: {payload}')
         thread = threading.Thread(
             target=self._execute_command,
             args=(command_type, payload),
@@ -511,7 +506,7 @@ class ArmExecutorNode(Node):
                 elif command_type == 'cartesian':
                     self.arm.move_to_cart_target_with_current_orientation(payload)
                 elif command_type == 'cart_waypoints':
-                    self.get_logger().info(
+                    self._debug_or_info(
                         'Executing cartesian waypoints with current orientation')
                     end_pose = self.arm.get_end_pose()
                     if end_pose is None or len(end_pose) < 2:
@@ -538,8 +533,8 @@ class ArmExecutorNode(Node):
                 else:
                     raise ValueError(f'Unsupported command type: {command_type}')
 
-            self.get_logger().info(f'{command_type} command done.')
-            self.get_logger().info(f'Executor status: DONE {command_type}')
+            self._debug_or_info(f'{command_type} command done.')
+            self._debug_or_info(f'Executor status: DONE {command_type}')
             self._publish_executor_status(self.DONE)
         except Exception as exc:
             current_end_pose = self._current_end_pose_for_log()
@@ -621,6 +616,12 @@ class ArmExecutorNode(Node):
     def _set_error(self, message: str):
         self.get_logger().error(message)
         self._publish_executor_status(self.ERROR)
+
+    def _debug_or_info(self, message: str):
+        if bool(self.get_parameter('verbose_log').value):
+            self.get_logger().info(message)
+        else:
+            self.get_logger().debug(message)
 
     def _current_end_pose_for_log(self):
         try:
