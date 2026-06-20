@@ -117,9 +117,9 @@ class GraspTaskConfig:
     official_reach_radius_m: float = 0.647
 
     workspace_x_min: float = 0.10
-    workspace_x_max: float = 1.00
-    workspace_y_min: float = -0.45
-    workspace_y_max: float = 0.50
+    workspace_x_max: float = 0.65
+    workspace_y_min: float = -0.35
+    workspace_y_max: float = 0.35
     workspace_z_min: float = 0.02
     workspace_z_max: float = 0.70
 
@@ -200,9 +200,9 @@ class GraspTaskConfig:
 
         # -- Workspace sub-keys ------------------------------------------
         wx_min = _pf("workspace_limits.x_min", 0.10)
-        wx_max = _pf("workspace_limits.x_max", 1.00)
-        wy_min = _pf("workspace_limits.y_min", -0.45)
-        wy_max = _pf("workspace_limits.y_max", 0.50)
+        wx_max = _pf("workspace_limits.x_max", 0.65)
+        wy_min = _pf("workspace_limits.y_min", -0.35)
+        wy_max = _pf("workspace_limits.y_max", 0.35)
         wz_min = _pf("workspace_limits.z_min", 0.02)
         wz_max = _pf("workspace_limits.z_max", 0.70)
 

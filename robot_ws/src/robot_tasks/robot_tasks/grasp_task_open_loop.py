@@ -1679,43 +1679,47 @@ class GraspTaskOpenLoop(Node):
 
     def _set_speed_profile(self, profile: str):
         profile = profile.lower()
-        if self.speed_profile_active == profile or self.pending_speed_profile == profile:
-            return
+        if self.speed_profile_active == profile:
+            return False
         self.pending_speed_profile = profile
+        return True
 
     def _handle_pending_speed_profile(self) -> bool:
         if self.pending_speed_profile is None:
             return False
         if not self._executor_accepting():
-            return False
-        self._cmd_port.publish_speed_profile(
+            return True
+        self._publish_speed_profile(
             self.pending_speed_profile, reason="speed_change")
-        self.speed_profile_active = self.pending_speed_profile
-        self.rejected_busy_count = 0
         self.get_logger().info(
             f'Published speed_profile: {self.pending_speed_profile}')
         self.pending_speed_profile = None
         return True
 
-    def _publish_cart_target(self, xyz: list):
-        self._cmd_port.publish_cart_target(xyz, reason=self.task_state)
+    def _publish_cart_target(self, xyz: list, reason: str = ""):
+        self._cmd_port.publish_cart_target(xyz, reason=reason)
         self.rejected_busy_count = 0
 
-    def _publish_cart_waypoints(self, points: list):
+    def _publish_cart_waypoints(self, points: list, reason: str = ""):
         self._cmd_port.publish_cart_waypoints(
             points, frame_id=self.get_parameter('base_frame').value)
         self.rejected_busy_count = 0
 
-    def _publish_joint_target(self, joint_pos: list):
-        self._cmd_port.publish_joint_target(joint_pos, reason=self.task_state)
+    def _publish_joint_target(self, joint_pos: list, reason: str = ""):
+        self._cmd_port.publish_joint_target(joint_pos, reason=reason)
         self.rejected_busy_count = 0
 
-    def _publish_gripper_command(self, command: str):
-        self._cmd_port.publish_gripper(command, reason=self.task_state)
+    def _publish_gripper_command(self, command: str, reason: str = ""):
+        self._cmd_port.publish_gripper(command, reason=reason)
         self.rejected_busy_count = 0
 
-    def _publish_reset_executor(self, command: str):
-        self._cmd_port.publish_reset(command, reason=self.task_state)
+    def _publish_speed_profile(self, profile: str, reason: str = ""):
+        self._cmd_port.publish_speed_profile(profile, reason=reason)
+        self.speed_profile_active = profile
+        self.rejected_busy_count = 0
+
+    def _publish_reset_executor(self, command: str, reason: str = ""):
+        self._cmd_port.publish_reset(command, reason=reason)
 
     def _debug_or_info(self, message: str):
         if bool(self.get_parameter('verbose_debug').value):
