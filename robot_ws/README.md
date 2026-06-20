@@ -9,8 +9,9 @@ AIRBOT Play 机械臂侧 ROS 2 工作区。当前主线是 AIRBOT Play 机械臂
 ```text
 /visual_target_base
   -> grasp_task_open_loop
-  -> /robot_arm/cart_target
-  -> /robot_arm/target_joint
+  -> /robot_arm/cart_waypoints   # main blended approach path
+  -> /robot_arm/cart_target      # sequential fallback only
+  -> /robot_arm/target_joint     # return-init / recover / non-approach stages
   -> /robot_arm/gripper_cmd
   -> /robot_arm/speed_profile
   -> arm_executor_node
@@ -70,8 +71,9 @@ python3 /home/sunrise/robot/hand_to_eye/camera_to_base_transform.py
 
 `grasp_task_open_loop` 发布：
 
-- `/robot_arm/target_joint` (`std_msgs/msg/Float64MultiArray`)
-- `/robot_arm/cart_target` (`geometry_msgs/msg/PointStamped`)
+- `/robot_arm/cart_waypoints` (`geometry_msgs/msg/PoseArray`): main blended approach path
+- `/robot_arm/cart_target` (`geometry_msgs/msg/PointStamped`): sequential fallback only
+- `/robot_arm/target_joint` (`std_msgs/msg/Float64MultiArray`): return-init / recover / non-approach stages
 - `/robot_arm/gripper_cmd` (`std_msgs/msg/String`)
 - `/robot_arm/speed_profile` (`std_msgs/msg/String`)
 - `/robot_arm/reset_executor` (`std_msgs/msg/String`)

@@ -201,9 +201,9 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('max_target_z_jump_m', 0.08)
 
         self.declare_parameter('workspace_limits.x_min', 0.10)
-        self.declare_parameter('workspace_limits.x_max', 1.00)
-        self.declare_parameter('workspace_limits.y_min', -0.45)
-        self.declare_parameter('workspace_limits.y_max', 0.50)
+        self.declare_parameter('workspace_limits.x_max', 0.65)
+        self.declare_parameter('workspace_limits.y_min', -0.35)
+        self.declare_parameter('workspace_limits.y_max', 0.35)
         self.declare_parameter('workspace_limits.z_min', 0.02)
         self.declare_parameter('workspace_limits.z_max', 0.70)
 
