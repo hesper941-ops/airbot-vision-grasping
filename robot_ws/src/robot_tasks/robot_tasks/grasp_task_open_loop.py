@@ -138,8 +138,9 @@ class GraspTaskOpenLoop(Node):
 
         self.get_logger().info(
             'GraspTaskOpenLoop started: main_flow='
-            'WAIT_PRE_TARGET -> PRE_OPEN_GRIPPER -> MOVE_PRE_GRASP -> MOVE_GRASP -> '
+            'WAIT_PRE_TARGET -> PRE_OPEN_GRIPPER -> MOVE_APPROACH_BLEND -> '
             'CLOSE_GRIPPER -> MOVE_LIFT -> RETURN_INIT_POSE, '
+            'sequential MOVE_PRE_GRASP -> MOVE_GRASP fallback enabled, '
             f'final_init_joint_pos_deg={list(self.get_parameter("final_init_joint_pos_deg").value)}.')
 
     def _declare_parameters(self):
@@ -154,7 +155,7 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('approach_priority', ['front', 'top_down'])
         self.declare_parameter('front_first_then_top_down', True)
         self.declare_parameter('max_approach_mode_retries', 1)
-        self.declare_parameter('blend_approach_enabled', False)
+        self.declare_parameter('blend_approach_enabled', True)
         self.declare_parameter('blend_approach_fallback_to_sequential', True)
         self.declare_parameter('continue_with_last_seen_during_motion', True)
         self.declare_parameter('table_z', 0.0)
@@ -372,6 +373,9 @@ class GraspTaskOpenLoop(Node):
         if self.executor_status == 'REJECTED_BUSY':
             if self.task_state == 'RECOVER':
                 return
+            if self.task_state == 'MOVE_APPROACH_BLEND':
+                self._fallback_blend_to_sequential('executor returned REJECTED_BUSY')
+                return
             self.rejected_busy_count += 1
             threshold = int(self.get_parameter('rejected_busy_recover_threshold').value)
             if self.rejected_busy_count >= threshold:
@@ -398,8 +402,8 @@ class GraspTaskOpenLoop(Node):
             if self.task_state == 'MOVE_APPROACH_BLEND':
                 self.get_logger().error(
                     f'Executor {self.executor_status} detected during MOVE_APPROACH_BLEND; '
-                    'entering RECOVER.')
-                self._enter_recover(
+                    'trying sequential fallback first.')
+                self._fallback_blend_to_sequential(
                     f'executor_error: Executor status {self.executor_status}')
                 return
             self.get_logger().error(
@@ -693,7 +697,7 @@ class GraspTaskOpenLoop(Node):
     def _go_to_pre_grasp_after_open(self):
         if self.selected_plan is None or not self.selected_plan.ok:
             self.get_logger().error(
-                'Cannot enter MOVE_PRE_GRASP: selected_plan missing or invalid; '
+                'Cannot enter approach motion: selected_plan missing or invalid; '
                 'return to WAIT_PRE_TARGET without motion.')
             self._transition('WAIT_PRE_TARGET', clear_window=True)
             return
@@ -712,13 +716,16 @@ class GraspTaskOpenLoop(Node):
     def _should_use_blend_approach(self) -> bool:
         if not bool(self.get_parameter('blend_approach_enabled').value):
             return False
-        self._ensure_approach_mode_started()
-        return self.current_approach_mode == 'front'
+        return True
 
     def _fallback_blend_to_sequential(self, reason: str):
         if bool(self.get_parameter('blend_approach_fallback_to_sequential').value):
             self.get_logger().warning(
-                'BLEND_APPROACH: fallback to sequential MOVE_PRE_GRASP -> MOVE_GRASP')
+                f'BLEND_APPROACH: fallback to sequential MOVE_PRE_GRASP -> MOVE_GRASP; '
+                f'reason={reason}; plan_id={self._selected_plan_id()}')
+            if self.executor_status in ('ERROR', 'TIMEOUT'):
+                self._publish_reset_executor('clear_error')
+                self.last_reset_executor_time = self._now_sec()
             self._reset_stage_vars()
             self._transition('MOVE_PRE_GRASP')
             return
@@ -740,24 +747,25 @@ class GraspTaskOpenLoop(Node):
             return
 
         if self.blend_waypoints is None:
-            pre_grasp = self._compute_pre_grasp_from_active_target()
-            if self.task_state != 'MOVE_APPROACH_BLEND':
+            try:
+                self.blend_waypoints = self._build_blend_waypoints_from_selected_plan()
+            except Exception as exc:
+                reason = f'MOVE_APPROACH_BLEND selected_plan waypoint error: {exc}'
+                self.get_logger().error(reason)
+                if self.selected_plan is None or not self.selected_plan.ok:
+                    self._transition('WAIT_PRE_TARGET', clear_window=True)
+                else:
+                    self._fallback_blend_to_sequential(reason)
                 return
-            final_grasp = self._compute_grasp_from_active_target()
-            if self.task_state != 'MOVE_APPROACH_BLEND':
-                return
-            if pre_grasp is None or final_grasp is None:
-                reason = self.last_target_failure_reason or 'MOVE_APPROACH_BLEND invalid waypoint'
-                self._fallback_blend_to_sequential(reason)
-                return
-            self.blend_waypoints = [list(pre_grasp), list(final_grasp)]
 
         if not self.state_command_sent:
             if not self._executor_accepting():
                 return
             try:
-                self.get_logger().warning(
-                    'BLEND_APPROACH: publish waypoints pre_grasp -> final_grasp')
+                self.get_logger().info(
+                    f'[GRASP] MOVE_APPROACH_BLEND plan_id={self._selected_plan_id()}, '
+                    f'approach_mode={self.current_approach_mode}, '
+                    f'cart_waypoints=true, waypoints={self._fmt_waypoints(self.blend_waypoints)}')
                 self._publish_cart_waypoints(self.blend_waypoints)
             except Exception as exc:
                 self.get_logger().error(
@@ -778,9 +786,48 @@ class GraspTaskOpenLoop(Node):
             self.stage_motion_started and self.executor_status == 'IDLE'
         ):
             self.get_logger().warning(
-                'BLEND_APPROACH: waypoints done; entering CLOSE_GRIPPER')
+                f'BLEND_APPROACH: cart_waypoints done; plan_id={self._selected_plan_id()}; '
+                'entering CLOSE_GRIPPER')
             self._reset_stage_vars()
             self._after_move_grasp()
+
+    def _build_blend_waypoints_from_selected_plan(self) -> list:
+        if self.selected_plan is None or not self.selected_plan.ok:
+            raise ValueError('selected_plan missing or invalid')
+        if self.selected_plan.pre_grasp is None or self.selected_plan.grasp is None:
+            raise ValueError('selected_plan.pre_grasp/grasp missing')
+
+        pre_grasp = self.planner.validate_waypoint(
+            list(self.selected_plan.pre_grasp),
+            is_final_grasp=False,
+            label='selected_plan.pre_grasp',
+        )
+        grasp = self.planner.validate_waypoint(
+            list(self.selected_plan.grasp),
+            is_final_grasp=True,
+            label='selected_plan.grasp',
+        )
+        waypoints = [pre_grasp, grasp]
+
+        if self.last_end_pose is not None:
+            current_z = float(self.last_end_pose[2])
+            safe_z = float(self.planner.safe_motion_z)
+            target_z = float(self.selected_plan.target_snapshot[2]) if self.selected_plan.target_snapshot else float(grasp[2])
+            if current_z < safe_z or current_z + 1e-6 < target_z:
+                lift_first = self.planner.validate_waypoint(
+                    [
+                        float(self.last_end_pose[0]),
+                        float(self.last_end_pose[1]),
+                        safe_z,
+                    ],
+                    is_final_grasp=False,
+                    label='blend_lift_first',
+                )
+                waypoints.insert(0, lift_first)
+
+        if len(waypoints) < 2:
+            raise ValueError('cart_waypoints requires at least 2 points')
+        return waypoints
 
     def _handle_move_pre_grasp(self):
         if self.stage_full_goal is not None:
@@ -1626,7 +1673,9 @@ class GraspTaskOpenLoop(Node):
             self.last_status_log_time = None
             self.get_logger().info(
                 f'[GRASP] {old_state} -> {new_state}; '
-                f'mode={self.current_approach_mode}')
+                f'mode={self.current_approach_mode}; '
+                f'plan_id={self._selected_plan_id()}; '
+                f'cart_waypoints={new_state == "MOVE_APPROACH_BLEND"}')
 
     def _set_speed_profile(self, profile: str):
         profile = profile.lower()
@@ -1689,14 +1738,33 @@ class GraspTaskOpenLoop(Node):
             return
         self.last_status_log_time = now
         target = self._fixed_target_xyz() or self.active_target_base or self.last_seen_target_base
+        goal = self.active_motion_goal or self.stage_full_goal or self.lift_goal
+        extra = ''
+        if self.task_state == 'MOVE_APPROACH_BLEND':
+            waypoints_count = len(self.blend_waypoints) if self.blend_waypoints else 0
+            final_goal = (
+                list(self.selected_plan.grasp)
+                if self.selected_plan is not None and self.selected_plan.grasp is not None
+                else None
+            )
+            goal = final_goal
+            extra = (
+                f', plan_id={self._selected_plan_id()}, '
+                f'waypoints_count={waypoints_count}, final_goal={self._fmt_xyz(final_goal)}')
         self.get_logger().info(format_status_summary(
             state=self.task_state,
             executor=self.executor_status,
             mode=self.current_approach_mode,
             target=target,
             end=self.last_end_pose,
-            goal=self.active_motion_goal or self.stage_full_goal or self.lift_goal,
-        ))
+            goal=goal,
+        ) + extra)
+
+    def _selected_plan_id(self):
+        return self.selected_plan.plan_id if self.selected_plan is not None else None
+
+    def _fmt_waypoints(self, waypoints: list) -> str:
+        return '[' + ', '.join(self._fmt_xyz(point) for point in waypoints) + ']'
 
     def _executor_accepting(self) -> bool:
         return self.executor_status in ('IDLE', 'DONE', '')

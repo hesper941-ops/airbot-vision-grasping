@@ -93,14 +93,17 @@ python3 /home/sunrise/robot/hand_to_eye/camera_to_base_transform.py
 ```text
 WAIT_PRE_TARGET
   -> PRE_OPEN_GRIPPER
-  -> MOVE_PRE_GRASP
-  -> MOVE_GRASP
+  -> MOVE_APPROACH_BLEND
   -> CLOSE_GRIPPER
   -> MOVE_LIFT
   -> RETURN_INIT_POSE
 ```
 
-open_loop 只在 `WAIT_PRE_TARGET` 阶段做目标稳定判断和 preflight planning。执行阶段使用冻结的 `selected_plan`，不再在 `MOVE_PRE_GRASP` 和 `MOVE_GRASP` 之间做二次视觉确认。
+当前推荐主线是 AIRBOT 官方多段轨迹融合 `/robot_arm/cart_waypoints`，由 `arm_executor_node` 调用 `move_cart_waypoints` 执行。open_loop 只在 `WAIT_PRE_TARGET` 阶段做目标稳定判断和 preflight planning。执行阶段使用冻结的 `selected_plan`，`MOVE_APPROACH_BLEND` 直接发送 `selected_plan.pre_grasp -> selected_plan.grasp`，不做二次视觉确认。
+
+`CLOSE_GRIPPER` 不能融合进轨迹：机械臂必须在 grasp 点停下，先闭合夹爪，再进入 `MOVE_LIFT` 抬升。
+
+`MOVE_PRE_GRASP -> MOVE_GRASP` sequential 路径仍保留，但只作为 `MOVE_APPROACH_BLEND` 失败或 `blend_approach_enabled=false` 时的 fallback。
 
 当前相机安装位置下，open_loop 不再进入 `SET_GRIPPER_ORIENTATION`，抓取前不再发布 J6 补偿 joint target。
 
@@ -128,7 +131,7 @@ open_loop 只在 `WAIT_PRE_TARGET` 阶段做目标稳定判断和 preflight plan
 
 只有至少一个 approach mode 成功规划，才进入 `PRE_OPEN_GRIPPER`。如果所有 mode 都失败，夹爪保持当前状态，任务停留在 `WAIT_PRE_TARGET` 等待新的稳定目标，并输出 workspace 拒绝原因。
 
-成功的规划会冻结为 `selected_plan`；`MOVE_PRE_GRASP`、`MOVE_GRASP`、`MOVE_LIFT` 直接执行其中的 waypoint，不在执行途中重新等待视觉确认。
+成功的规划会冻结为 `selected_plan`；默认主线中 `MOVE_APPROACH_BLEND` 直接执行其中的 `pre_grasp` 和 `grasp` waypoint，`MOVE_LIFT` 在夹爪闭合后执行 `lift_goal`。sequential fallback 也复用同一个 `selected_plan`，不在执行途中重新等待视觉确认或重新计算目标。
 
 默认优先级：
 
@@ -137,6 +140,18 @@ approach_priority: ["front", "top_down"]
 ```
 
 front 失败时会尝试 top_down；全部失败才作为最终拒绝。
+
+## TODO：实机验证后清理
+
+实机验证 `move_cart_waypoints` 主线跑通后，计划清理：
+
+1. 删除 visual_servo 方案
+2. 删除 legacy J6 补偿路径
+3. 删除未接入的 active_search / search_pose / old sequence 模块
+4. 删除 sequential fallback 或保留为 debug mode
+5. 精简 README 和 launch
+
+这些内容本轮先保留，避免在主线实机验证前破坏仓库完整性。
 
 ## Front Pre-Grasp 自适应
 

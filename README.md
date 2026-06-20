@@ -17,10 +17,14 @@ duck_detector_node
 
 Default approach behavior:
 - `blend_approach_enabled: true`
-- The default front approach is `pre_grasp -> final_grasp` through the internal
-  `/robot_arm/cart_waypoints` path.
-- The legacy `MOVE_PRE_GRASP -> MOVE_GRASP` two-step approach remains available
-  as fallback, and is also used when `blend_approach_enabled: false`.
+- The recommended open_loop main path is the AIRBOT official multi-waypoint
+  blend through the internal `/robot_arm/cart_waypoints` path.
+- Current main flow:
+  `WAIT_PRE_TARGET -> PRE_OPEN_GRIPPER -> MOVE_APPROACH_BLEND -> CLOSE_GRIPPER -> MOVE_LIFT -> RETURN_INIT_POSE`.
+- The sequential `MOVE_PRE_GRASP -> MOVE_GRASP` approach remains available
+  only as fallback, and is also used when `blend_approach_enabled: false`.
+- `CLOSE_GRIPPER` is not blended into the trajectory: the arm must stop at the
+  grasp point, close the gripper, and only then lift.
 - This does not use official `ArmControlOptions` or `blend_radius` parameters.
   It uses the existing SDK `PLANNING_WAYPOINTS / move_with_cart_waypoints`
   path through `AirbotWrapper.move_cart_waypoints()`.
@@ -121,9 +125,22 @@ directly to `/robot_arm/cart_waypoints`; that topic is still an internal
 waypoint blend execution topic from `grasp_task_open_loop.py` to
 `arm_executor_node.py`.
 
-The waypoint blend approach is unchanged. The existing
-`open_loop_grasp.launch.py` remains available as the lower-level debug
-entrypoint.
+The waypoint blend approach is the recommended open_loop main path. The
+existing `open_loop_grasp.launch.py` remains available as the lower-level
+debug entrypoint.
 
 Autostart templates and installation notes are in
 `docs/auto_start_bringup.md`.
+
+## TODO After Real-Machine Validation
+
+After the `move_cart_waypoints` main path is verified on hardware, planned
+cleanup:
+
+1. Delete the `visual_servo` plan.
+2. Delete the legacy J6 compensation path.
+3. Delete unused `active_search`, `search_pose`, and old sequence modules.
+4. Delete the sequential fallback or keep it as debug mode only.
+5. Trim README and launch files.
+
+These files stay in the repository until the real-machine path is stable.

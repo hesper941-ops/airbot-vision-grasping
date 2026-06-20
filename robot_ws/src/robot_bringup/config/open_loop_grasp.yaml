@@ -87,12 +87,19 @@ grasp_task_open_loop:
     # ==================================================================
     # [2.4] Approach planning (抓取方向规划)
     # Unit: meter.
+    # Recommended open_loop main path:
+    # WAIT_PRE_TARGET -> PRE_OPEN_GRIPPER -> MOVE_APPROACH_BLEND ->
+    # CLOSE_GRIPPER -> MOVE_LIFT -> RETURN_INIT_POSE.
+    # MOVE_APPROACH_BLEND sends AIRBOT official cart_waypoints to
+    # arm_executor_node / move_cart_waypoints. CLOSE_GRIPPER is not blended
+    # into the trajectory; the arm must stop at grasp before closing.
+    # Sequential MOVE_PRE_GRASP -> MOVE_GRASP is fallback only.
     # ==================================================================
     approach_mode: "front"
     approach_priority: ["front", "top_down"]
     front_first_then_top_down: true
     max_approach_mode_retries: 1
-    blend_approach_enabled: false
+    blend_approach_enabled: true
     blend_approach_fallback_to_sequential: true
 
     # 预抓取 / 抓取 / 抬升 / 前方靠近偏移量 (meter).

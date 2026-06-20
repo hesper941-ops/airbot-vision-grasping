@@ -92,7 +92,7 @@ class GraspTaskConfig:
     approach_priority: List[str] = field(default_factory=lambda: ["front", "top_down"])
     front_first_then_top_down: bool = True
     max_approach_mode_retries: int = 1
-    blend_approach_enabled: bool = False
+    blend_approach_enabled: bool = True
     blend_approach_fallback_to_sequential: bool = True
 
     # Geometry (meters)
@@ -243,7 +243,7 @@ class GraspTaskConfig:
             approach_priority=list(_p("approach_priority", ["front", "top_down"])),
             front_first_then_top_down=_pb("front_first_then_top_down", True),
             max_approach_mode_retries=_pi("max_approach_mode_retries", 1),
-            blend_approach_enabled=_pb("blend_approach_enabled", False),
+            blend_approach_enabled=_pb("blend_approach_enabled", True),
             blend_approach_fallback_to_sequential=_pb(
                 "blend_approach_fallback_to_sequential", True),
 
