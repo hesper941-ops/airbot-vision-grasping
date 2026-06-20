@@ -1,8 +1,9 @@
 """Shared grasp waypoint planner.
 
 The planner converts a stable 3D target into simple Cartesian waypoints used by
-the open-loop and visual-servo task nodes. It also computes the pre-grasp joint6
-orientation compensation while respecting configured joint limits.
+the open-loop and visual-servo task nodes. Legacy J6 helpers are kept for older
+callers and visual_servo compatibility, but open_loop does not use pre-grasp J6
+compensation.
 """
 
 import math
@@ -230,12 +231,11 @@ class GraspPlanner:
         return math.radians(self.joint6_compensation_deg)
 
     def compute_joint6_target(self, current_joint_pos: list) -> Optional[list]:
-        # Deprecated for the open-loop main path. Kept for legacy/visual-servo compatibility.
-        """Choose a safe J6 target from preferred offsets (±90°), excluding 0°.
+        """Legacy/visual_servo compatibility helper for choosing a J6 target.
 
-        Candidates are j6_home + offset for each offset in j6_preferred_offsets_deg.
-        Offsets of 0° are excluded — the gripper must rotate ±90° for grasping.
-        Candidates are tested in priority order; the first valid one wins.
+        The open_loop main path does not call this function. Candidates are
+        derived from j6_home + each configured offset and tested in priority
+        order against hardware and configured camera-orientation limits.
         """
         self.last_j6_debug = []
         if len(current_joint_pos) < 6:
@@ -252,7 +252,7 @@ class GraspPlanner:
             offset_deg = float(offset_deg)
             if abs(offset_deg) < 0.01:
                 self.last_j6_debug.append(
-                    f'Skip J6 candidate home{offset_deg:+.1f}°: 0° offset not allowed for grasping.')
+                    f'Skip J6 candidate home{offset_deg:+.1f}°: legacy helper ignores zero offset.')
                 continue
 
             value = home + math.radians(offset_deg)

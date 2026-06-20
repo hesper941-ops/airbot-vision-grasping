@@ -101,6 +101,7 @@ class GraspTaskOpenLoop(Node):
         self.rejected_busy_count = 0
         self.last_status_log_time: Optional[float] = None
         self.selected_plan: Optional[PlanningResult] = None
+        self.plan_id_counter = 0
 
         self.target_sub = self.create_subscription(
             VisualTarget,
@@ -467,6 +468,7 @@ class GraspTaskOpenLoop(Node):
                 f'Still waiting for stable /visual_target_base in WAIT_PRE_TARGET '
                 f'(elapsed {self._state_elapsed():.1f}s). '
                 f'Clearing stale target stability and continuing to wait.')
+            self._clear_selected_plan('WAIT_PRE_TARGET stale target stability reset')
             self._target_mgr.reset_stability()
             self.state_start_time = self._now_sec()
             return
@@ -495,10 +497,11 @@ class GraspTaskOpenLoop(Node):
             if plan is None or not plan.ok:
                 self.get_logger().error(
                     'All approach modes rejected before opening gripper; stay in WAIT_PRE_TARGET.')
+                self._clear_selected_plan('preflight failed')
                 self._target_mgr.reset_stability()
                 self.state_start_time = self._now_sec()
                 return
-            self.selected_plan = plan
+            self._activate_selected_plan(plan, self._fixed_target_xyz() or self.pre_target)
             self.current_approach_mode = plan.approach_mode
             self.planner.set_approach_mode(plan.approach_mode)
             self.stage_full_goal = None
@@ -507,7 +510,7 @@ class GraspTaskOpenLoop(Node):
                 f'Pre target stable: {self._fmt_xyz(self.pre_target)}; '
                 f'fixed_target_snapshot={self._fmt_xyz(self._fixed_target_xyz())}')
             self.get_logger().info(
-                f'Selected approach_mode={plan.approach_mode}: '
+                f'Selected plan_id={plan.plan_id}, approach_mode={plan.approach_mode}: '
                 f'pre_grasp={self._fmt_xyz(plan.pre_grasp)}, '
                 f'grasp={self._fmt_xyz(plan.grasp)}, lift_goal={self._fmt_xyz(plan.lift_goal)}')
             self._transition('PRE_OPEN_GRIPPER')
@@ -650,6 +653,13 @@ class GraspTaskOpenLoop(Node):
             ok=False,
         )
 
+    def _activate_selected_plan(self, plan: PlanningResult, target_snapshot: list):
+        self.plan_id_counter += 1
+        plan.plan_id = self.plan_id_counter
+        plan.created_time_sec = self._now_sec()
+        plan.target_snapshot = list(target_snapshot)
+        self.selected_plan = plan
+
     def _try_plan_mode(self, target: list, mode: str) -> PlanningResult:
         result = PlanningResult(approach_mode=mode, target=list(target), ok=False)
         self.planner.last_attempted_pre_grasp = None
@@ -686,6 +696,12 @@ class GraspTaskOpenLoop(Node):
             return result
 
     def _go_to_pre_grasp_after_open(self):
+        if self.selected_plan is None or not self.selected_plan.ok:
+            self.get_logger().error(
+                'Cannot enter MOVE_PRE_GRASP: selected_plan missing or invalid; '
+                'return to WAIT_PRE_TARGET without motion.')
+            self._transition('WAIT_PRE_TARGET', clear_window=True)
+            return
         self._set_speed_profile('fast')
         if self._should_use_blend_approach():
             self._transition('MOVE_APPROACH_BLEND')
@@ -776,12 +792,17 @@ class GraspTaskOpenLoop(Node):
             goal_fn = lambda: self.stage_full_goal
         else:
             def goal_fn():
-                goal = self._compute_pre_grasp_from_active_target()
+                if self.selected_plan is None or not self.selected_plan.ok or self.selected_plan.pre_grasp is None:
+                    self.last_target_failure_reason = 'selected_plan.pre_grasp missing'
+                    self.get_logger().error(
+                        'MOVE_PRE_GRASP requires selected_plan.pre_grasp; no dynamic recompute in main path.')
+                    return None
+                goal = list(self.selected_plan.pre_grasp)
                 if goal is not None:
                     self.stage_full_goal = list(goal)
                     self.get_logger().info(
-                        f'MOVE_PRE_GRASP fixed_goal={self._fmt_xyz(self.stage_full_goal)}')
-                    self.get_logger().info('MOVE_PRE_GRASP using frozen goal.')
+                        f'MOVE_PRE_GRASP fixed_goal={self._fmt_xyz(self.stage_full_goal)} '
+                        f'from selected_plan={self.selected_plan.plan_id}.')
                 return goal
         self._handle_cartesian_motion(
             'MOVE_PRE_GRASP',
@@ -830,13 +851,17 @@ class GraspTaskOpenLoop(Node):
             goal_fn = lambda: self.stage_full_goal
         else:
             def goal_fn():
-                goal = self._compute_grasp_from_active_target()
+                if self.selected_plan is None or not self.selected_plan.ok or self.selected_plan.grasp is None:
+                    self.last_target_failure_reason = 'selected_plan.grasp missing'
+                    self.get_logger().error(
+                        'MOVE_GRASP requires selected_plan.grasp; no dynamic recompute in main path.')
+                    return None
+                goal = list(self.selected_plan.grasp)
                 if goal is not None:
                     self.stage_full_goal = list(goal)
                     self.get_logger().info(
-                        f'MOVE_GRASP fixed_goal={self._fmt_xyz(self.stage_full_goal)}')
-                    self.get_logger().info(
-                        'MOVE_GRASP using frozen goal; visual loss will not interrupt this stage.')
+                        f'MOVE_GRASP fixed_goal={self._fmt_xyz(self.stage_full_goal)} '
+                        f'from selected_plan={self.selected_plan.plan_id}.')
                 return goal
         self._handle_cartesian_motion(
             'MOVE_GRASP',
@@ -1069,7 +1094,19 @@ class GraspTaskOpenLoop(Node):
                 self._enter_recover()
                 return
             self.grasp_closed = True
-            self.lift_goal = self.planner.compute_safe_lift(self.last_end_pose)
+            if (
+                self.selected_plan is not None
+                and self.selected_plan.ok
+                and self.selected_plan.lift_goal is not None
+            ):
+                self.lift_goal = list(self.selected_plan.lift_goal)
+                self.get_logger().info(
+                    f'MOVE_LIFT fixed_goal={self._fmt_xyz(self.lift_goal)} '
+                    f'from selected_plan={self.selected_plan.plan_id}.')
+            else:
+                self.lift_goal = self.planner.compute_safe_lift(self.last_end_pose)
+                self.get_logger().warning(
+                    'MOVE_LIFT selected_plan.lift_goal missing; fallback to current end_pose lift.')
             self.get_logger().info(
                 f'MOVE_LIFT fixed_goal={self._fmt_xyz(self.lift_goal)}')
             self.get_logger().info(
@@ -1143,6 +1180,7 @@ class GraspTaskOpenLoop(Node):
         if self._now_sec() - self.settle_start_time >= self._param_float('gripper_settle_sec'):
             self.get_logger().info('Return init pose reached; cycle complete.')
             self.grasp_closed = False
+            self._clear_selected_plan('RETURN_INIT_POSE complete')
             self._finish_cycle()
 
     def _handle_move_retreat(self):
@@ -1459,10 +1497,22 @@ class GraspTaskOpenLoop(Node):
             and 'top_down' in priority
             and 'top_down' not in self.approach_failed_modes
         ):
+            target = self._fixed_target_xyz() or self.pre_target or self.active_target_base
+            if target is None:
+                self._clear_selected_plan('front fallback has no target for top_down preflight')
+                self._enter_recover('front fallback has no target for top_down preflight')
+                return
             self.current_approach_mode = 'top_down'
             self.current_approach_index = priority.index('top_down')
             self.approach_retry_count = 0
             self.planner.set_approach_mode('top_down')
+            fallback_plan = self._try_plan_mode(target, 'top_down')
+            if not fallback_plan.ok:
+                self._clear_selected_plan('top_down fallback preflight failed')
+                self._enter_recover(
+                    f'top_down fallback preflight failed: {fallback_plan.reason}')
+                return
+            self._activate_selected_plan(fallback_plan, target)
             self.target_frozen = False
             self.active_motion_goal = None
             self._reset_stage_vars()
@@ -1501,6 +1551,7 @@ class GraspTaskOpenLoop(Node):
     def _enter_recover(self, reason: str = ''):
         if self.task_state == 'RECOVER':
             return
+        self._clear_selected_plan(f'enter RECOVER: {reason}')
         self.recover_reason = self._classify_recover_reason(reason)
         self.recover_detail = reason
         if reason:
@@ -1522,6 +1573,7 @@ class GraspTaskOpenLoop(Node):
     def _enter_post_grasp_recover(self, reason: str = ''):
         if self.task_state == 'RECOVER':
             return
+        self._clear_selected_plan(f'enter post-grasp RECOVER: {reason}')
         self.recover_reason = self._classify_recover_reason(reason)
         self.recover_detail = reason
         if reason:
@@ -1551,6 +1603,7 @@ class GraspTaskOpenLoop(Node):
         self._transition('IDLE')
 
     def _reset_cycle(self):
+        self._clear_selected_plan('reset cycle')
         self.latest_target = None
         self.latest_target_time = None
         self.pre_target = None
@@ -1582,6 +1635,12 @@ class GraspTaskOpenLoop(Node):
         self._ctx.fixed_target_snapshot = None
         self._reset_stage_vars()
 
+    def _clear_selected_plan(self, reason: str):
+        if self.selected_plan is not None:
+            self.get_logger().debug(
+                f'Clear selected_plan id={self.selected_plan.plan_id}: {reason}')
+        self.selected_plan = None
+
     def _reset_stage_vars(self):
         self.state_command_sent = False
         self.stage_motion_started = False
@@ -1596,6 +1655,8 @@ class GraspTaskOpenLoop(Node):
         self.state_start_time = self._now_sec()
         self._reset_stage_vars()
         if clear_window:
+            if new_state == 'WAIT_PRE_TARGET':
+                self._clear_selected_plan('enter WAIT_PRE_TARGET with clear_window=true')
             self._target_mgr.reset_stability()
         if old_state != new_state:
             self.rejected_busy_count = 0

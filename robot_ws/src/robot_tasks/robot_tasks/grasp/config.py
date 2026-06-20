@@ -147,9 +147,9 @@ class GraspTaskConfig:
     return_init_timeout_sec: float = 10.0
 
     # -- Motion control ------------------------------------------------------
-    max_cartesian_step: float = 0.08
-    position_tolerance_m: float = 0.02
-    settle_time_sec: float = 0.5
+    max_cartesian_step: float = 0.04
+    position_tolerance_m: float = 0.015
+    settle_time_sec: float = 0.8
     joint_speed_safe_threshold: float = 0.1
     post_joint_rotate_settle_sec: float = 0.5
     end_pose_timeout_sec: float = 1.0
@@ -157,7 +157,7 @@ class GraspTaskConfig:
     # -- Timeouts (seconds) --------------------------------------------------
     wait_pre_target_warn_sec: float = 15.0
     wait_grasp_target_timeout_sec: float = 8.0
-    motion_timeout_sec: float = 12.0
+    motion_timeout_sec: float = 16.0
     set_orientation_timeout_sec: float = 8.0
     close_gripper_timeout_sec: float = 4.0
     recover_timeout_sec: float = 15.0
@@ -291,16 +291,16 @@ class GraspTaskConfig:
             final_init_joint_pos_deg=_plf("final_init_joint_pos_deg", [0.0, -45.0, 110.0, -90.0, 90.0, 0.0]),
             return_init_timeout_sec=_pf("return_init_timeout_sec", 10.0),
 
-            max_cartesian_step=_pf("max_cartesian_step", 0.08),
-            position_tolerance_m=_pf("position_tolerance_m", 0.02),
-            settle_time_sec=_pf("settle_time_sec", 0.5),
+            max_cartesian_step=_pf("max_cartesian_step", 0.04),
+            position_tolerance_m=_pf("position_tolerance_m", 0.015),
+            settle_time_sec=_pf("settle_time_sec", 0.8),
             joint_speed_safe_threshold=_pf("joint_speed_safe_threshold", 0.1),
             post_joint_rotate_settle_sec=_pf("post_joint_rotate_settle_sec", 0.5),
             end_pose_timeout_sec=_pf("end_pose_timeout_sec", 1.0),
 
             wait_pre_target_warn_sec=_pf("wait_pre_target_warn_sec", 15.0),
             wait_grasp_target_timeout_sec=_pf("wait_grasp_target_timeout_sec", 8.0),
-            motion_timeout_sec=_pf("motion_timeout_sec", 12.0),
+            motion_timeout_sec=_pf("motion_timeout_sec", 16.0),
             set_orientation_timeout_sec=_pf("set_orientation_timeout_sec", 8.0),
             close_gripper_timeout_sec=_pf("close_gripper_timeout_sec", 4.0),
             recover_timeout_sec=_pf("recover_timeout_sec", 15.0),

@@ -109,9 +109,9 @@ grasp_task_open_loop:
     front_grasp_x_offset_max: 0.075
 
     # ==================================================================
-    # [2.5] J6 end-effector orientation (末端夹爪方向)
-    # 抓取前 J6 必须从 home 旋转 ±90°, 不允许停留在 home.
-    # J6 home 仅用于 init/recover, 不用作抓取姿态.
+    # [2.5] Legacy J6 settings, not used by open_loop main path.
+    # Current open_loop does not run pre-grasp J6 compensation.
+    # J6 init/return angle is 0 deg.
     # Unit: degree / rad.
     # ==================================================================
     joint6_min_rad: -2.9671
@@ -120,8 +120,6 @@ grasp_task_open_loop:
     j6_home_deg: 0.0
     j6_allowed_delta_deg: 90.0
 
-    # 抓取前只允许 home ± 这些 offset.
-    # 0° offset 被排除 —— 抓取姿态必须旋转 ±90°.
     forbid_camera_upside_down: true
     return_j6_to_home_on_recover: true
 
