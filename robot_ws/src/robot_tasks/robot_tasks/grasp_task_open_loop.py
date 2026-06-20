@@ -208,8 +208,8 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('workspace_limits.z_max', 0.70)
 
         self.declare_parameter('position_tolerance', 0.02)
-        self.declare_parameter('position_tolerance_m', 0.02)
-        self.declare_parameter('settle_time_sec', 0.5)
+        self.declare_parameter('position_tolerance_m', 0.015)
+        self.declare_parameter('settle_time_sec', 0.8)
         self.declare_parameter('joint_speed_safe_threshold', 0.1)
         self.declare_parameter('post_joint_rotate_settle_sec', 0.5)
         self.declare_parameter('gripper_settle_sec', 1.0)
@@ -219,10 +219,10 @@ class GraspTaskOpenLoop(Node):
 
         # Cartesian step-by-step: each command limited to this distance.
         # Must be smaller than AirbotWrapper's 0.100 m single-step safety limit.
-        self.declare_parameter('max_cartesian_step', 0.08)
+        self.declare_parameter('max_cartesian_step', 0.04)
 
         self.declare_parameter('wait_pre_target_warn_sec', 15.0)
-        self.declare_parameter('motion_timeout_sec', 12.0)
+        self.declare_parameter('motion_timeout_sec', 16.0)
         self.declare_parameter('set_orientation_timeout_sec', 8.0)
         self.declare_parameter('close_gripper_timeout_sec', 4.0)
         self.declare_parameter('recover_timeout_sec', 15.0)
@@ -785,7 +785,7 @@ class GraspTaskOpenLoop(Node):
         if self.executor_status == 'DONE' or (
             self.stage_motion_started and self.executor_status == 'IDLE'
         ):
-            self.get_logger().warning(
+            self.get_logger().info(
                 f'BLEND_APPROACH: cart_waypoints done; plan_id={self._selected_plan_id()}; '
                 'entering CLOSE_GRIPPER')
             self._reset_stage_vars()

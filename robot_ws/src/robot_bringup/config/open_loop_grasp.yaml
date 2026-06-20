@@ -7,13 +7,14 @@
 #   transform / target manager
 #       -> base-frame target
 #   grasp_task_open_loop
-#       -> /robot_arm/cart_target
-#       -> /robot_arm/target_joint
+#       -> /robot_arm/cart_waypoints   # main AIRBOT official blended trajectory path
+#       -> /robot_arm/cart_target      # sequential fallback only
 #       -> /robot_arm/gripper_cmd
 #       -> /robot_arm/speed_profile
 #       -> /robot_arm/reset_executor
+#       -> /robot_arm/target_joint     # return-init / recover / non-approach stages
 #   arm_executor_node (唯一 AIRBOT SDK owner)
-#       -> AIRBOT SDK
+#       -> AIRBOT SDK move_cart_waypoints
 # ======================================================================
 
 
