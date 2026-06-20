@@ -3,9 +3,9 @@
 #
 # Main data flow:
 #   detector nodes
-#       -> /duck_position, /green_box_position, /apple_position, ...
+#       -> /duck_position, /green_box_position, /apple_position
 #   transform / target manager
-#       -> base-frame target
+#       -> /visual_target_base
 #   grasp_task_open_loop
 #       -> /robot_arm/cart_waypoints   # main AIRBOT official blended trajectory path
 #       -> /robot_arm/cart_target      # sequential fallback only
@@ -13,7 +13,7 @@
 #       -> /robot_arm/speed_profile
 #       -> /robot_arm/reset_executor
 #       -> /robot_arm/target_joint     # return-init / recover / non-approach stages
-#   arm_executor_node (唯一 AIRBOT SDK owner)
+#   arm_executor_node
 #       -> AIRBOT SDK move_cart_waypoints
 # ======================================================================
 

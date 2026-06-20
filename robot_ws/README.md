@@ -15,7 +15,7 @@ AIRBOT Play 机械臂侧 ROS 2 工作区。当前主线是 AIRBOT Play 机械臂
   -> /robot_arm/gripper_cmd
   -> /robot_arm/speed_profile
   -> arm_executor_node
-  -> AIRBOT SDK
+  -> AIRBOT SDK move_cart_waypoints
 ```
 
 `/visual_target_base` 由 `hand_to_eye/camera_to_base_transform.py` 发布，坐标必须已经在 `base_link` 下。不要在主链路中启动 `hand_to_eye/end_position_publisher.py`，它会直接连接 AIRBOT SDK，只能用于旧调试链路。
