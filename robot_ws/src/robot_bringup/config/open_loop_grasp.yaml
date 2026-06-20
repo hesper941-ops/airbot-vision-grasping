@@ -82,7 +82,6 @@ grasp_task_open_loop:
     last_seen_target_max_age_sec: 8.0
     update_target_during_motion: false
     freeze_target_before_close: true
-    require_second_visual_confirm: false
     continue_with_last_seen_during_motion: true
 
     # ==================================================================
@@ -179,7 +178,6 @@ grasp_task_open_loop:
     # Unit: second.
     # ==================================================================
     wait_pre_target_warn_sec: 15.0
-    wait_grasp_target_timeout_sec: 8.0
     motion_timeout_sec: 16.0
     set_orientation_timeout_sec: 8.0
     close_gripper_timeout_sec: 4.0

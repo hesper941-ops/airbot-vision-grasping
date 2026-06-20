@@ -100,7 +100,7 @@ WAIT_PRE_TARGET
   -> RETURN_INIT_POSE
 ```
 
-`require_second_visual_confirm=true` 时，`MOVE_PRE_GRASP` 和 `MOVE_GRASP` 之间会额外进入 `WAIT_GRASP_TARGET` 做二次视觉确认。
+open_loop 只在 `WAIT_PRE_TARGET` 阶段做目标稳定判断和 preflight planning。执行阶段使用冻结的 `selected_plan`，不再在 `MOVE_PRE_GRASP` 和 `MOVE_GRASP` 之间做二次视觉确认。
 
 当前相机安装位置下，open_loop 不再进入 `SET_GRIPPER_ORIENTATION`，抓取前不再发布 J6 补偿 joint target。
 
@@ -127,6 +127,8 @@ WAIT_PRE_TARGET
 - 检查 workspace 和官方 reach radius
 
 只有至少一个 approach mode 成功规划，才进入 `PRE_OPEN_GRIPPER`。如果所有 mode 都失败，夹爪保持当前状态，任务停留在 `WAIT_PRE_TARGET` 等待新的稳定目标，并输出 workspace 拒绝原因。
+
+成功的规划会冻结为 `selected_plan`；`MOVE_PRE_GRASP`、`MOVE_GRASP`、`MOVE_LIFT` 直接执行其中的 waypoint，不在执行途中重新等待视觉确认。
 
 默认优先级：
 

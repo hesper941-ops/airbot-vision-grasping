@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Open-loop grasp task with two visual stability confirmations.
+"""Single preflight-confirmed open-loop waypoint grasp task.
 
 The task node consumes /visual_target_base in base_link coordinates and sends
 explicit joint/cartesian/gripper/speed commands to arm_executor_node. It does
@@ -39,7 +39,7 @@ from robot_tasks.grasp.planning_result import PlanningResult
 
 
 class GraspTaskOpenLoop(Node):
-    """Two-stage visual-confirmed open-loop grasp state machine."""
+    """Preflight-confirmed open-loop waypoint grasp state machine."""
 
     def __init__(self):
         super().__init__('grasp_task_open_loop')
@@ -196,7 +196,6 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('last_seen_target_max_age_sec', 8.0)
         self.declare_parameter('update_target_during_motion', False)
         self.declare_parameter('freeze_target_before_close', True)
-        self.declare_parameter('require_second_visual_confirm', False)
         self.declare_parameter('max_target_jump_m', 0.08)
         self.declare_parameter('max_target_z_jump_m', 0.08)
 
@@ -222,7 +221,6 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('max_cartesian_step', 0.08)
 
         self.declare_parameter('wait_pre_target_warn_sec', 15.0)
-        self.declare_parameter('wait_grasp_target_timeout_sec', 8.0)
         self.declare_parameter('motion_timeout_sec', 12.0)
         self.declare_parameter('set_orientation_timeout_sec', 8.0)
         self.declare_parameter('close_gripper_timeout_sec', 4.0)
@@ -430,9 +428,6 @@ class GraspTaskOpenLoop(Node):
 
             elif self.task_state == 'MOVE_APPROACH_BLEND':
                 self._handle_move_approach_blend()
-
-            elif self.task_state == 'WAIT_GRASP_TARGET':
-                self._handle_wait_grasp_target()
 
             elif self.task_state == 'MOVE_GRASP':
                 self._handle_move_grasp()
@@ -810,39 +805,7 @@ class GraspTaskOpenLoop(Node):
             on_done=self._after_move_pre_grasp,
         )
 
-    def _handle_wait_grasp_target(self):
-        if self._state_elapsed() > self._param_float('wait_grasp_target_timeout_sec'):
-            self.get_logger().error('WAIT_GRASP_TARGET timeout.')
-            self._handle_approach_failure('WAIT_GRASP_TARGET timeout')
-            return
-
-        if self._target_mgr.has_stable_target():
-            stable = self._target_mgr.get_stable_target()
-            grasp_xyz = [stable.x, stable.y, stable.z]
-            if self.pre_target is not None:
-                drift = self._distance(grasp_xyz, self.pre_target)
-                max_drift = self._param_float('stable_position_threshold_m') * 4.0
-                if drift > max_drift:
-                    self.get_logger().error(
-                        f'Grasp target drift too large after pre-grasp: '
-                        f'{drift:.4f}m > {max_drift:.4f}m.')
-                    self._handle_approach_failure(
-                        f'Grasp target drift too large after pre-grasp: '
-                        f'{drift:.4f}m > {max_drift:.4f}m')
-                    return
-            self.grasp_target = grasp_xyz
-            if not self.target_frozen:
-                self.active_target_base = list(self.grasp_target)
-            self.get_logger().info(
-                f'Grasp target stable: {self._fmt_xyz(self.grasp_target)}')
-            self._set_speed_profile('slow')
-            self._transition('MOVE_GRASP')
-
     def _after_move_pre_grasp(self):
-        if bool(self.get_parameter('require_second_visual_confirm').value):
-            self._transition('WAIT_GRASP_TARGET', clear_window=True)
-            return
-
         self._set_speed_profile('slow')
         self._transition('MOVE_GRASP')
 
@@ -1479,7 +1442,7 @@ class GraspTaskOpenLoop(Node):
         return True
 
     def _handle_approach_failure(self, reason: str):
-        approach_states = ('MOVE_APPROACH_BLEND', 'MOVE_PRE_GRASP', 'MOVE_GRASP', 'WAIT_GRASP_TARGET')
+        approach_states = ('MOVE_APPROACH_BLEND', 'MOVE_PRE_GRASP', 'MOVE_GRASP')
         if self.task_state not in approach_states:
             if self.grasp_closed:
                 self._enter_post_grasp_recover(reason)

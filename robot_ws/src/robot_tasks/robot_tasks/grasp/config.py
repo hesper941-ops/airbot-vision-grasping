@@ -85,7 +85,6 @@ class GraspTaskConfig:
     last_seen_target_max_age_sec: float = 8.0
     update_target_during_motion: bool = False
     freeze_target_before_close: bool = True
-    require_second_visual_confirm: bool = False
     continue_with_last_seen_during_motion: bool = True
 
     # -- Approach planning ---------------------------------------------------
@@ -156,7 +155,6 @@ class GraspTaskConfig:
 
     # -- Timeouts (seconds) --------------------------------------------------
     wait_pre_target_warn_sec: float = 15.0
-    wait_grasp_target_timeout_sec: float = 8.0
     motion_timeout_sec: float = 16.0
     set_orientation_timeout_sec: float = 8.0
     close_gripper_timeout_sec: float = 4.0
@@ -239,7 +237,6 @@ class GraspTaskConfig:
             last_seen_target_max_age_sec=_pf("last_seen_target_max_age_sec", 8.0),
             update_target_during_motion=_pb("update_target_during_motion", False),
             freeze_target_before_close=_pb("freeze_target_before_close", True),
-            require_second_visual_confirm=_pb("require_second_visual_confirm", False),
             continue_with_last_seen_during_motion=_pb("continue_with_last_seen_during_motion", True),
 
             approach_mode=str(_p("approach_mode", "front")),
@@ -299,7 +296,6 @@ class GraspTaskConfig:
             end_pose_timeout_sec=_pf("end_pose_timeout_sec", 1.0),
 
             wait_pre_target_warn_sec=_pf("wait_pre_target_warn_sec", 15.0),
-            wait_grasp_target_timeout_sec=_pf("wait_grasp_target_timeout_sec", 8.0),
             motion_timeout_sec=_pf("motion_timeout_sec", 16.0),
             set_orientation_timeout_sec=_pf("set_orientation_timeout_sec", 8.0),
             close_gripper_timeout_sec=_pf("close_gripper_timeout_sec", 4.0),
