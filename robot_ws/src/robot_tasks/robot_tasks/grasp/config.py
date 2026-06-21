@@ -101,7 +101,7 @@ class GraspTaskConfig:
     # Geometry (meters)
     pre_grasp_z_offset: float = 0.06
     grasp_z_offset: float = 0.02
-    lift_z_offset: float = 0.08
+    lift_z_offset: float = 0.04
     front_approach_x_offset: float = -0.10
     front_approach_z_offset: float = 0.05
     adaptive_front_pre_grasp: bool = True
@@ -150,6 +150,7 @@ class GraspTaskConfig:
 
     # -- Motion control ------------------------------------------------------
     max_cartesian_step: float = 0.06
+    lift_cartesian_step_m: float = 0.03
     cart_waypoint_max_step_m: float = 0.10
     cart_waypoint_safe_limit_m: float = 0.12
     position_tolerance_m: float = 0.015
@@ -261,7 +262,7 @@ class GraspTaskConfig:
 
             pre_grasp_z_offset=_pf("pre_grasp_z_offset", 0.06),
             grasp_z_offset=_pf("grasp_z_offset", 0.02),
-            lift_z_offset=_pf("lift_z_offset", 0.08),
+            lift_z_offset=_pf("lift_z_offset", 0.04),
             front_approach_x_offset=_pf("front_approach_x_offset", -0.10),
             front_approach_z_offset=_pf("front_approach_z_offset", 0.05),
             adaptive_front_pre_grasp=_pb("adaptive_front_pre_grasp", True),
@@ -301,6 +302,7 @@ class GraspTaskConfig:
             return_init_timeout_sec=_pf("return_init_timeout_sec", 10.0),
 
             max_cartesian_step=_pf("max_cartesian_step", 0.06),
+            lift_cartesian_step_m=_pf("lift_cartesian_step_m", 0.03),
             cart_waypoint_max_step_m=_pf("cart_waypoint_max_step_m", 0.10),
             cart_waypoint_safe_limit_m=_pf("cart_waypoint_safe_limit_m", 0.12),
             position_tolerance_m=_pf("position_tolerance_m", 0.015),

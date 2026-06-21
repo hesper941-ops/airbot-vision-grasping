@@ -16,7 +16,7 @@ class GraspPlanner:
     def __init__(self, config: dict):
         self.pre_grasp_z_offset = config.get('pre_grasp_z_offset', 0.06)
         self.grasp_z_offset = config.get('grasp_z_offset', 0.02)
-        self.lift_z_offset = config.get('lift_z_offset', 0.08)
+        self.lift_z_offset = config.get('lift_z_offset', 0.04)
         self.safe_pose = config.get('safe_pose', [0.35, 0.00, 0.35])
         self.approach_mode = str(config.get('approach_mode', 'front')).strip().lower()
         self.table_z = float(config.get('table_z', 0.0))

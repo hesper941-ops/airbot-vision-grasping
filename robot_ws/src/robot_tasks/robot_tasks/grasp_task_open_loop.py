@@ -157,7 +157,7 @@ class GraspTaskOpenLoop(Node):
 
         self.declare_parameter('pre_grasp_z_offset', 0.06)
         self.declare_parameter('grasp_z_offset', 0.02)
-        self.declare_parameter('lift_z_offset', 0.08)
+        self.declare_parameter('lift_z_offset', 0.04)
         self.declare_parameter('safe_pose', [0.35, 0.0, 0.35])
         self.declare_parameter('approach_mode', 'front')
         self.declare_parameter('approach_priority', ['front', 'top_down'])
@@ -231,6 +231,7 @@ class GraspTaskOpenLoop(Node):
         # Cartesian step-by-step: each command limited to this distance.
         # Keep waypoint max step below the configured executor safety limit.
         self.declare_parameter('max_cartesian_step', 0.06)
+        self.declare_parameter('lift_cartesian_step_m', 0.03)
         self.declare_parameter('cart_waypoint_max_step_m', 0.10)
         self.declare_parameter('cart_waypoint_safe_limit_m', 0.12)
 
@@ -391,7 +392,7 @@ class GraspTaskOpenLoop(Node):
             if self.task_state == 'MOVE_APPROACH_BLEND':
                 self._schedule_blend_busy_retry('executor returned REJECTED_BUSY')
                 return
-            if self.task_state in ('MOVE_PRE_GRASP', 'MOVE_GRASP'):
+            if self.task_state in ('MOVE_PRE_GRASP', 'MOVE_GRASP', 'MOVE_LIFT'):
                 self._schedule_cartesian_busy_retry(
                     f'{self.task_state} executor returned REJECTED_BUSY')
                 return
@@ -1272,13 +1273,15 @@ class GraspTaskOpenLoop(Node):
             'MOVE_LIFT',
             lambda: list(self.lift_goal),
             on_done=self._after_move_lift,
+            step_param='lift_cartesian_step_m',
+            failure_handler=self._enter_post_grasp_recover,
         )
 
     def _after_move_lift(self):
         if bool(self.get_parameter('return_to_init_after_grasp').value):
             self.get_logger().info(
+                'MOVE_LIFT done; entering RETURN_INIT_POSE. '
                 'Grasp succeeded; keeping gripper closed. '
-                'Returning to init joint pose after grasp: '
                 f'{list(self.get_parameter("final_init_joint_pos_deg").value)}')
             self._transition('RETURN_INIT_POSE')
         else:
@@ -1466,7 +1469,15 @@ class GraspTaskOpenLoop(Node):
             ])
         return self.planner.get_safe_pose()
 
-    def _handle_cartesian_motion(self, state_name: str, goal_fn, on_done, timeout_param='motion_timeout_sec'):
+    def _handle_cartesian_motion(
+        self,
+        state_name: str,
+        goal_fn,
+        on_done,
+        timeout_param='motion_timeout_sec',
+        step_param='max_cartesian_step',
+        failure_handler=None,
+    ):
         """Step-by-step Cartesian movement with per-step settle gating.
 
         Each invocation publishes at most one step_goal (computed via limit_step
@@ -1475,13 +1486,24 @@ class GraspTaskOpenLoop(Node):
 
         When full_goal is reached and the settle timer expires, on_done() fires.
         """
+        failure_handler = failure_handler or self._handle_approach_failure
+
         if self._state_elapsed() > self._param_float(timeout_param):
             self.get_logger().error(f'{state_name} timeout.')
-            self._handle_approach_failure(f'{state_name} timeout')
+            failure_handler(f'{state_name} timeout')
             return
 
         if self.pending_speed_profile is not None:
             return
+
+        busy_retry_ready = False
+        if self.cartesian_busy_retry_after is not None:
+            if self._now_sec() < self.cartesian_busy_retry_after:
+                return
+            self.cartesian_busy_retry_after = None
+            self.state_command_sent = False
+            self.stage_motion_started = False
+            busy_retry_ready = True
 
         if not self._fresh_end_pose_available():
             return
@@ -1492,7 +1514,7 @@ class GraspTaskOpenLoop(Node):
             full_goal = goal_fn()
         except Exception as exc:
             self.get_logger().error(f'{state_name}: failed to compute motion goal: {exc}')
-            self._handle_approach_failure(f'{state_name} goal exception: {exc}')
+            failure_handler(f'{state_name} goal exception: {exc}')
             return
         if self.task_state != state_name and state_name in ('MOVE_PRE_GRASP', 'MOVE_GRASP'):
             return
@@ -1501,7 +1523,7 @@ class GraspTaskOpenLoop(Node):
             if self.last_target_failure_reason is not None:
                 self._enter_recover(self.last_target_failure_reason)
                 return
-            self._handle_approach_failure(f'{state_name} invalid motion goal')
+            failure_handler(f'{state_name} invalid motion goal')
             return
         full_goal = [float(full_goal[0]), float(full_goal[1]), float(full_goal[2])]
         try:
@@ -1514,7 +1536,7 @@ class GraspTaskOpenLoop(Node):
                 f'{state_name}: full_goal outside safety constraints: {exc}; '
                 f'current_approach_mode={self.current_approach_mode}, '
                 f'workspace_limits={self.planner.workspace_limits}.')
-            self._handle_approach_failure(f'{state_name} full_goal unsafe: {exc}')
+            failure_handler(f'{state_name} full_goal unsafe: {exc}')
             return
 
         tolerance = self._position_tolerance()
@@ -1538,11 +1560,14 @@ class GraspTaskOpenLoop(Node):
 
         # ---- Not yet sent the next step → compute and publish step_goal ----
         if not self.state_command_sent:
-            if not self._executor_accepting():
+            if not self._executor_accepting() and not busy_retry_ready:
                 return
 
             if self.active_motion_goal is None:
-                max_step = self._param_float('max_cartesian_step')
+                max_step = min(
+                    self._param_float('max_cartesian_step'),
+                    self._param_float(step_param),
+                ) if step_param != 'max_cartesian_step' else self._param_float('max_cartesian_step')
                 step_goal = self.planner.limit_step(
                     self.last_end_pose, full_goal, max_step)
                 is_final_step = self._distance(step_goal, full_goal) <= tolerance
@@ -1563,13 +1588,22 @@ class GraspTaskOpenLoop(Node):
                         )
                 except Exception as exc:
                     self.get_logger().error(f'{state_name}: unsafe step_goal: {exc}')
-                    self._handle_approach_failure(f'{state_name} unsafe step_goal: {exc}')
+                    failure_handler(f'{state_name} unsafe step_goal: {exc}')
                     return
                 self.active_motion_goal = [
                     float(step_goal[0]),
                     float(step_goal[1]),
                     float(step_goal[2]),
                 ]
+                if state_name == 'MOVE_LIFT':
+                    step_distance = self._distance(self.last_end_pose, self.active_motion_goal)
+                    self.get_logger().info(
+                        'MOVE_LIFT plan: '
+                        f'current_end={self._fmt_xyz(self.last_end_pose)}, '
+                        f'lift_goal={self._fmt_xyz(full_goal)}, '
+                        f'lift_z_offset={self._param_float("lift_z_offset"):.3f}, '
+                        f'lift_step_target={self._fmt_xyz(self.active_motion_goal)}, '
+                        f'step_distance={step_distance:.4f}m.')
 
             self._publish_cart_target(self.active_motion_goal)
             self.state_command_sent = True
@@ -1585,7 +1619,7 @@ class GraspTaskOpenLoop(Node):
         # ---- Step command sent; wait for step_goal ----
         if self.active_motion_goal is None:
             self.get_logger().error(f'{state_name}: active_motion_goal is missing.')
-            self._handle_approach_failure(f'{state_name} active_motion_goal missing')
+            failure_handler(f'{state_name} active_motion_goal missing')
             return
 
         distance_to_step = self._distance(self.last_end_pose, self.active_motion_goal)
@@ -1630,8 +1664,11 @@ class GraspTaskOpenLoop(Node):
     def _schedule_cartesian_busy_retry(self, reason: str):
         max_retries = self._param_int('sequential_busy_max_retries')
         if self.cartesian_busy_retry_count >= max_retries:
-            self._handle_approach_failure(
-                f'{reason}; busy retries exceeded {max_retries}')
+            failure = f'{reason}; busy retries exceeded {max_retries}'
+            if self.task_state == 'MOVE_LIFT':
+                self._enter_post_grasp_recover(failure)
+            else:
+                self._handle_approach_failure(failure)
             return
 
         self.cartesian_busy_retry_count += 1
@@ -1877,7 +1914,7 @@ class GraspTaskOpenLoop(Node):
             if new_state == 'MOVE_APPROACH_BLEND':
                 self.blend_busy_retry_count = 0
                 self.blend_busy_retry_after = None
-            if new_state in ('MOVE_PRE_GRASP', 'MOVE_GRASP'):
+            if new_state in ('MOVE_PRE_GRASP', 'MOVE_GRASP', 'MOVE_LIFT'):
                 self.cartesian_busy_retry_count = 0
                 self.cartesian_busy_retry_after = None
             self.last_status_log_time = None
