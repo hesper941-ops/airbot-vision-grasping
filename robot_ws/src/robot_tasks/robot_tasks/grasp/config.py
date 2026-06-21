@@ -99,13 +99,13 @@ class GraspTaskConfig:
     blend_approach_busy_max_retries: int = 3
 
     # Geometry (meters)
-    pre_grasp_z_offset: float = 0.10
+    pre_grasp_z_offset: float = 0.06
     grasp_z_offset: float = 0.02
-    lift_z_offset: float = 0.10
+    lift_z_offset: float = 0.08
     front_approach_x_offset: float = -0.10
     front_approach_z_offset: float = 0.05
     adaptive_front_pre_grasp: bool = True
-    workspace_soft_margin_m: float = 0.02
+    workspace_soft_margin_m: float = 0.04
     min_front_pre_grasp_distance_m: float = 0.04
     front_grasp_x_offset: float = 0.065
     front_grasp_x_offset_max: float = 0.075
@@ -117,14 +117,14 @@ class GraspTaskConfig:
     min_safe_motion_z: float = 0.08
     reject_target_below_table: bool = True
     safe_pose: List[float] = field(default_factory=lambda: [0.35, 0.0, 0.35])
-    official_reach_radius_m: float = 0.647
+    official_reach_radius_m: float = 0.68
 
     workspace_x_min: float = 0.10
-    workspace_x_max: float = 0.65
-    workspace_y_min: float = -0.35
-    workspace_y_max: float = 0.35
+    workspace_x_max: float = 0.68
+    workspace_y_min: float = -0.38
+    workspace_y_max: float = 0.38
     workspace_z_min: float = 0.02
-    workspace_z_max: float = 0.70
+    workspace_z_max: float = 0.75
 
     # -- J6 end-effector orientation -----------------------------------------
     joint6_compensation_deg: float = 90.0
@@ -149,9 +149,9 @@ class GraspTaskConfig:
     return_init_timeout_sec: float = 10.0
 
     # -- Motion control ------------------------------------------------------
-    max_cartesian_step: float = 0.04
-    cart_waypoint_max_step_m: float = 0.09
-    cart_waypoint_safe_limit_m: float = 0.10
+    max_cartesian_step: float = 0.06
+    cart_waypoint_max_step_m: float = 0.10
+    cart_waypoint_safe_limit_m: float = 0.12
     position_tolerance_m: float = 0.015
     settle_time_sec: float = 0.8
     joint_speed_safe_threshold: float = 0.1
@@ -207,11 +207,11 @@ class GraspTaskConfig:
 
         # -- Workspace sub-keys ------------------------------------------
         wx_min = _pf("workspace_limits.x_min", 0.10)
-        wx_max = _pf("workspace_limits.x_max", 0.65)
-        wy_min = _pf("workspace_limits.y_min", -0.35)
-        wy_max = _pf("workspace_limits.y_max", 0.35)
+        wx_max = _pf("workspace_limits.x_max", 0.68)
+        wy_min = _pf("workspace_limits.y_min", -0.38)
+        wy_max = _pf("workspace_limits.y_max", 0.38)
         wz_min = _pf("workspace_limits.z_min", 0.02)
-        wz_max = _pf("workspace_limits.z_max", 0.70)
+        wz_max = _pf("workspace_limits.z_max", 0.75)
 
         # -- Active search sub-struct ------------------------------------
         asc = ActiveSearchConfig(
@@ -259,13 +259,13 @@ class GraspTaskConfig:
             blend_approach_busy_max_retries=_pi(
                 "blend_approach_busy_max_retries", 3),
 
-            pre_grasp_z_offset=_pf("pre_grasp_z_offset", 0.10),
+            pre_grasp_z_offset=_pf("pre_grasp_z_offset", 0.06),
             grasp_z_offset=_pf("grasp_z_offset", 0.02),
-            lift_z_offset=_pf("lift_z_offset", 0.10),
+            lift_z_offset=_pf("lift_z_offset", 0.08),
             front_approach_x_offset=_pf("front_approach_x_offset", -0.10),
             front_approach_z_offset=_pf("front_approach_z_offset", 0.05),
             adaptive_front_pre_grasp=_pb("adaptive_front_pre_grasp", True),
-            workspace_soft_margin_m=_pf("workspace_soft_margin_m", 0.02),
+            workspace_soft_margin_m=_pf("workspace_soft_margin_m", 0.04),
             min_front_pre_grasp_distance_m=_pf("min_front_pre_grasp_distance_m", 0.04),
             front_grasp_x_offset=_pf("front_grasp_x_offset", 0.065),
             front_grasp_x_offset_max=_pf("front_grasp_x_offset_max", 0.075),
@@ -276,7 +276,7 @@ class GraspTaskConfig:
             min_safe_motion_z=_pf("min_safe_motion_z", 0.08),
             reject_target_below_table=_pb("reject_target_below_table", True),
             safe_pose=_plf("safe_pose", [0.35, 0.0, 0.35]),
-            official_reach_radius_m=_pf("official_reach_radius_m", 0.647),
+            official_reach_radius_m=_pf("official_reach_radius_m", 0.68),
 
             workspace_x_min=wx_min, workspace_x_max=wx_max,
             workspace_y_min=wy_min, workspace_y_max=wy_max,
@@ -300,9 +300,9 @@ class GraspTaskConfig:
             final_init_joint_pos_deg=_plf("final_init_joint_pos_deg", [0.0, -45.0, 110.0, -90.0, 90.0, 0.0]),
             return_init_timeout_sec=_pf("return_init_timeout_sec", 10.0),
 
-            max_cartesian_step=_pf("max_cartesian_step", 0.04),
-            cart_waypoint_max_step_m=_pf("cart_waypoint_max_step_m", 0.09),
-            cart_waypoint_safe_limit_m=_pf("cart_waypoint_safe_limit_m", 0.10),
+            max_cartesian_step=_pf("max_cartesian_step", 0.06),
+            cart_waypoint_max_step_m=_pf("cart_waypoint_max_step_m", 0.10),
+            cart_waypoint_safe_limit_m=_pf("cart_waypoint_safe_limit_m", 0.12),
             position_tolerance_m=_pf("position_tolerance_m", 0.015),
             settle_time_sec=_pf("settle_time_sec", 0.8),
             joint_speed_safe_threshold=_pf("joint_speed_safe_threshold", 0.1),

@@ -111,13 +111,13 @@ grasp_task_open_loop:
     blend_approach_busy_max_retries: 3
 
     # 预抓取 / 抓取 / 抬升 / 前方靠近偏移量 (meter).
-    pre_grasp_z_offset: 0.10
+    pre_grasp_z_offset: 0.06
     grasp_z_offset: 0.02
-    lift_z_offset: 0.10
+    lift_z_offset: 0.08
     front_approach_x_offset: -0.10
     front_approach_z_offset: 0.05
     adaptive_front_pre_grasp: true
-    workspace_soft_margin_m: 0.02
+    workspace_soft_margin_m: 0.04
     min_front_pre_grasp_distance_m: 0.04
     front_grasp_x_offset: 0.065
     front_grasp_x_offset_max: 0.075
@@ -146,16 +146,16 @@ grasp_task_open_loop:
     final_grasp_clearance: 0.015
     min_safe_motion_z: 0.08
     reject_target_below_table: true
-    official_reach_radius_m: 0.647
+    official_reach_radius_m: 0.68
     safe_pose: [0.35, 0.0, 0.35]
 
     workspace_limits:
       x_min: 0.10
-      x_max: 0.65
-      y_min: -0.35
-      y_max: 0.35
+      x_max: 0.68
+      y_min: -0.38
+      y_max: 0.38
       z_min: 0.02
-      z_max: 0.70
+      z_max: 0.75
     # If real-machine tests confirm additional reachable area, tune these
     # workspace_limits here. The planner does not silently clamp final grasp.
 
@@ -179,12 +179,12 @@ grasp_task_open_loop:
     # [2.8] Motion control (运动控制)
     # Unit: meter / second.
     # ==================================================================
-    # 单步最大步长, 必须小于 AirbotWrapper 的 0.100 m 限制.
-    max_cartesian_step: 0.04
+    # 单步最大步长, 必须小于 executor 当前配置的安全限制.
+    max_cartesian_step: 0.06
     # cart_waypoints interpolation target and executor hard safety limit.
     # Keep max step below safe limit; do not raise safe limit to hide long segments.
-    cart_waypoint_max_step_m: 0.09
-    cart_waypoint_safe_limit_m: 0.10
+    cart_waypoint_max_step_m: 0.10
+    cart_waypoint_safe_limit_m: 0.12
     position_tolerance: 0.02
     position_tolerance_m: 0.015
     settle_time_sec: 0.8

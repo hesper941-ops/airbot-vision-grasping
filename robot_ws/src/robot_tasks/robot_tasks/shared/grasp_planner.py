@@ -14,9 +14,9 @@ class GraspPlanner:
     """Generate staged Cartesian waypoints from a target in base_link."""
 
     def __init__(self, config: dict):
-        self.pre_grasp_z_offset = config.get('pre_grasp_z_offset', 0.12)
-        self.grasp_z_offset = config.get('grasp_z_offset', 0.0)
-        self.lift_z_offset = config.get('lift_z_offset', 0.10)
+        self.pre_grasp_z_offset = config.get('pre_grasp_z_offset', 0.06)
+        self.grasp_z_offset = config.get('grasp_z_offset', 0.02)
+        self.lift_z_offset = config.get('lift_z_offset', 0.08)
         self.safe_pose = config.get('safe_pose', [0.35, 0.00, 0.35])
         self.approach_mode = str(config.get('approach_mode', 'front')).strip().lower()
         self.table_z = float(config.get('table_z', 0.0))
@@ -25,14 +25,14 @@ class GraspPlanner:
         self.front_approach_x_offset = float(config.get('front_approach_x_offset', -0.10))
         self.front_approach_z_offset = float(config.get('front_approach_z_offset', 0.05))
         self.adaptive_front_pre_grasp = bool(config.get('adaptive_front_pre_grasp', True))
-        self.workspace_soft_margin_m = float(config.get('workspace_soft_margin_m', 0.02))
+        self.workspace_soft_margin_m = float(config.get('workspace_soft_margin_m', 0.04))
         self.min_front_pre_grasp_distance_m = float(
             config.get('min_front_pre_grasp_distance_m', 0.04))
         self.front_grasp_x_offset = float(config.get('front_grasp_x_offset', 0.065))
         self.front_grasp_x_offset_max = float(config.get('front_grasp_x_offset_max', 0.075))
         self.min_safe_motion_z = float(config.get('min_safe_motion_z', 0.08))
         self.reject_target_below_table = bool(config.get('reject_target_below_table', True))
-        self.official_reach_radius_m = float(config.get('official_reach_radius_m', 0.647))
+        self.official_reach_radius_m = float(config.get('official_reach_radius_m', 0.68))
         self.joint6_compensation_deg = config.get('joint6_compensation_deg', 90.0)
         self.j6_home_deg = float(config.get('j6_home_deg', 90.0))
         self.j6_allowed_delta_deg = float(config.get('j6_allowed_delta_deg', 90.0))
@@ -47,11 +47,11 @@ class GraspPlanner:
 
         limits = config.get('workspace_limits', {})
         self.x_min = limits.get('x_min', 0.10)
-        self.x_max = limits.get('x_max', 1.00)
-        self.y_min = limits.get('y_min', -0.45)
-        self.y_max = limits.get('y_max', 0.50)
+        self.x_max = limits.get('x_max', 0.68)
+        self.y_min = limits.get('y_min', -0.38)
+        self.y_max = limits.get('y_max', 0.38)
         self.z_min = limits.get('z_min', 0.02)
-        self.z_max = limits.get('z_max', 0.70)
+        self.z_max = limits.get('z_max', 0.75)
         self.last_attempted_pre_grasp = None
         self.last_attempted_grasp = None
 

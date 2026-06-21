@@ -155,9 +155,9 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('allow_empty_target_frame', False)
 
-        self.declare_parameter('pre_grasp_z_offset', 0.10)
+        self.declare_parameter('pre_grasp_z_offset', 0.06)
         self.declare_parameter('grasp_z_offset', 0.02)
-        self.declare_parameter('lift_z_offset', 0.10)
+        self.declare_parameter('lift_z_offset', 0.08)
         self.declare_parameter('safe_pose', [0.35, 0.0, 0.35])
         self.declare_parameter('approach_mode', 'front')
         self.declare_parameter('approach_priority', ['front', 'top_down'])
@@ -175,13 +175,13 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('front_approach_x_offset', -0.10)
         self.declare_parameter('front_approach_z_offset', 0.05)
         self.declare_parameter('adaptive_front_pre_grasp', True)
-        self.declare_parameter('workspace_soft_margin_m', 0.02)
+        self.declare_parameter('workspace_soft_margin_m', 0.04)
         self.declare_parameter('min_front_pre_grasp_distance_m', 0.04)
         self.declare_parameter('front_grasp_x_offset', 0.065)
         self.declare_parameter('front_grasp_x_offset_max', 0.075)
         self.declare_parameter('min_safe_motion_z', 0.08)
         self.declare_parameter('reject_target_below_table', True)
-        self.declare_parameter('official_reach_radius_m', 0.647)
+        self.declare_parameter('official_reach_radius_m', 0.68)
         # Conservative J6 range based on AIRBOT Play official specs.
         # Confirm exact hardware model before widening this range.
         self.declare_parameter('joint6_min_rad', -2.9671)
@@ -212,11 +212,11 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('max_target_z_jump_m', 0.08)
 
         self.declare_parameter('workspace_limits.x_min', 0.10)
-        self.declare_parameter('workspace_limits.x_max', 0.65)
-        self.declare_parameter('workspace_limits.y_min', -0.35)
-        self.declare_parameter('workspace_limits.y_max', 0.35)
+        self.declare_parameter('workspace_limits.x_max', 0.68)
+        self.declare_parameter('workspace_limits.y_min', -0.38)
+        self.declare_parameter('workspace_limits.y_max', 0.38)
         self.declare_parameter('workspace_limits.z_min', 0.02)
-        self.declare_parameter('workspace_limits.z_max', 0.70)
+        self.declare_parameter('workspace_limits.z_max', 0.75)
 
         self.declare_parameter('position_tolerance', 0.02)
         self.declare_parameter('position_tolerance_m', 0.015)
@@ -229,10 +229,10 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('pre_grasp_open_settle_sec', 1.0)
 
         # Cartesian step-by-step: each command limited to this distance.
-        # Must be smaller than AirbotWrapper's 0.100 m single-step safety limit.
-        self.declare_parameter('max_cartesian_step', 0.04)
-        self.declare_parameter('cart_waypoint_max_step_m', 0.09)
-        self.declare_parameter('cart_waypoint_safe_limit_m', 0.10)
+        # Keep waypoint max step below the configured executor safety limit.
+        self.declare_parameter('max_cartesian_step', 0.06)
+        self.declare_parameter('cart_waypoint_max_step_m', 0.10)
+        self.declare_parameter('cart_waypoint_safe_limit_m', 0.12)
 
         self.declare_parameter('wait_pre_target_warn_sec', 15.0)
         self.declare_parameter('motion_timeout_sec', 16.0)
@@ -644,6 +644,36 @@ class GraspTaskOpenLoop(Node):
                     'Please adjust the mobile base before retrying.')
             return False
 
+    def _log_plan_radius_check(self, result: PlanningResult) -> bool:
+        official_radius = self._param_float('official_reach_radius_m')
+        pre_radius = self.planner.compute_radius(result.pre_grasp)
+        grasp_radius = self.planner.compute_radius(result.grasp)
+        lift_radius = self.planner.compute_radius(result.lift_goal)
+        self.get_logger().info(
+            'Plan radius check: '
+            f'approach_mode={result.approach_mode}, '
+            f'pre_grasp radius={pre_radius:.3f}m, '
+            f'grasp radius={grasp_radius:.3f}m, '
+            f'lift_goal radius={lift_radius:.3f}m, '
+            f'official_reach_radius_m={official_radius:.3f}m.')
+
+        if pre_radius > official_radius + 0.05:
+            result.reason = (
+                f'pre_grasp radius={pre_radius:.3f}m exceeds '
+                f'official_reach_radius_m + 0.05={official_radius + 0.05:.3f}m')
+            self.last_target_failure_reason = result.reason
+            self.get_logger().error(
+                f'Plan rejected: {result.reason}, '
+                f'pre_grasp={self._fmt_xyz(result.pre_grasp)}.')
+            return False
+        if pre_radius > official_radius:
+            self.get_logger().warning(
+                'pre_grasp is slightly outside official reach radius; '
+                f'pre_grasp radius={pre_radius:.3f}m, '
+                f'official_reach_radius_m={official_radius:.3f}m, '
+                f'pre_grasp={self._fmt_xyz(result.pre_grasp)}.')
+        return True
+
     def _preflight_plan_approach_modes(self, target: list) -> Optional[PlanningResult]:
         failures = []
         for mode in self._approach_priority():
@@ -704,6 +734,8 @@ class GraspTaskOpenLoop(Node):
                 ],
                 label='lift_goal',
             )
+            if not self._log_plan_radius_check(result):
+                return result
             result.ok = True
             return result
         except Exception as exc:
