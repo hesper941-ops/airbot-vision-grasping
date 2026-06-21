@@ -3,7 +3,7 @@
 import math
 from collections import deque
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +65,7 @@ class TargetManager:
 
         # 稳定性窗口，保存 TargetObservation 对象
         self._window: deque = deque(
-            maxlen=max(1, config.stable_frame_count_required))
+            maxlen=max(1, int(getattr(config, 'target_stability_window', 8))))
 
     # ------------------------------------------------------------------
     # 接收新帧
@@ -84,6 +84,10 @@ class TargetManager:
         # 合法性检查
         if not self._is_valid(obs):
             self.reset_stability()
+            return False
+
+        if self._is_window_outlier(obs):
+            self.latest_observation = obs
             return False
 
         # 跳变拒绝
@@ -115,30 +119,20 @@ class TargetManager:
 
     def is_stable(self) -> bool:
         """当前窗口内的目标是否已经稳定。"""
-        required = self._config.stable_frame_count_required
+        required = int(getattr(
+            self._config,
+            'target_stability_min_samples',
+            self._config.stable_frame_count_required,
+        ))
         if len(self._window) < required:
             return False
 
-        median_xyz = self._stable_median()
-        max_dist = max(
-            math.hypot(
-                obs.x - median_xyz[0],
-                obs.y - median_xyz[1],
-                obs.z - median_xyz[2],
-            )
-            for obs in self._window
+        dx, dy, dz = self.window_range()
+        return (
+            dx <= float(getattr(self._config, 'target_stability_max_range_x', 0.015))
+            and dy <= float(getattr(self._config, 'target_stability_max_range_y', 0.012))
+            and dz <= float(getattr(self._config, 'target_stability_max_range_z', 0.015))
         )
-
-        depth_vals = [obs.depth for obs in self._window
-                      if math.isfinite(obs.depth)]
-        max_depth_delta = 0.0
-        if depth_vals:
-            med_depth = sorted(depth_vals)[len(depth_vals) // 2]
-            max_depth_delta = max(abs(d - med_depth) for d in depth_vals)
-
-        ok_pos = max_dist <= self._config.stable_position_threshold_m
-        ok_depth = max_depth_delta <= self._config.stable_depth_threshold_m
-        return ok_pos and ok_depth
 
     def has_stable_target(self) -> bool:
         """是否有当前稳定目标。"""
@@ -236,6 +230,46 @@ class TargetManager:
         self._window.clear()
         self.stable_target = None
 
+    def sample_count(self) -> int:
+        return len(self._window)
+
+    def window_range(self) -> Tuple[float, float, float]:
+        if not self._window:
+            return (0.0, 0.0, 0.0)
+        xs = [obs.x for obs in self._window]
+        ys = [obs.y for obs in self._window]
+        zs = [obs.z for obs in self._window]
+        return (
+            max(xs) - min(xs),
+            max(ys) - min(ys),
+            max(zs) - min(zs),
+        )
+
+    def window_median_xyz(self) -> Optional[List[float]]:
+        if not self._window:
+            return None
+        return self._stable_median()
+
+    def stability_decision(self) -> tuple:
+        samples = len(self._window)
+        required = int(getattr(
+            self._config,
+            'target_stability_min_samples',
+            self._config.stable_frame_count_required,
+        ))
+        ranges = self.window_range()
+        median = self.window_median_xyz()
+        if samples < required:
+            return False, f'need {required} samples', samples, ranges, median
+        dx, dy, dz = ranges
+        if dx > float(getattr(self._config, 'target_stability_max_range_x', 0.015)):
+            return False, 'x range too large', samples, ranges, median
+        if dy > float(getattr(self._config, 'target_stability_max_range_y', 0.012)):
+            return False, 'y range too large', samples, ranges, median
+        if dz > float(getattr(self._config, 'target_stability_max_range_z', 0.015)):
+            return False, 'z range too large', samples, ranges, median
+        return True, 'stable window median accepted', samples, ranges, median
+
     def reset(self):
         """完全重置。"""
         self.latest_observation = None
@@ -288,6 +322,18 @@ class TargetManager:
             dist > self._config.max_target_jump_m
             or z_jump > self._config.max_target_z_jump_m
         )
+
+    def _is_window_outlier(self, obs: TargetObservation) -> bool:
+        median = self.window_median_xyz()
+        if median is None:
+            return False
+        dist = math.sqrt(
+            (obs.x - median[0]) ** 2
+            + (obs.y - median[1]) ** 2
+            + (obs.z - median[2]) ** 2
+        )
+        return dist > float(getattr(
+            self._config, 'target_outlier_reject_distance', 0.04))
 
     def _in_workspace(self, xyz: List[float]) -> bool:
         return (

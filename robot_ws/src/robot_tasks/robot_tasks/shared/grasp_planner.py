@@ -15,6 +15,7 @@ class GraspPlanner:
 
     def __init__(self, config: dict):
         self.pre_grasp_z_offset = config.get('pre_grasp_z_offset', 0.06)
+        self.top_down_pre_grasp_z_offset = config.get('top_down_pre_grasp_z_offset', 0.035)
         self.grasp_z_offset = config.get('grasp_z_offset', 0.02)
         self.lift_z_offset = config.get('lift_z_offset', 0.04)
         self.safe_pose = config.get('safe_pose', [0.35, 0.00, 0.35])
@@ -82,7 +83,7 @@ class GraspPlanner:
             waypoint = [
                 target[0],
                 target[1],
-                max(target[2] + self.pre_grasp_z_offset, safe_z),
+                max(target[2] + self.top_down_pre_grasp_z_offset, safe_z),
             ]
         elif self.approach_mode == 'front':
             waypoint = [

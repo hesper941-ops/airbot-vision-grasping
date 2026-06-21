@@ -8,6 +8,7 @@ not call the AIRBOT SDK and does not perform camera-to-base transforms.
 """
 
 import math
+from collections import deque
 from typing import Optional
 
 import rclpy
@@ -86,6 +87,11 @@ class GraspTaskOpenLoop(Node):
 
         self.last_end_pose: Optional[list] = None
         self.last_end_pose_time: Optional[float] = None
+        self.end_pose_stability_window = deque(maxlen=max(
+            1, int(self.get_parameter('end_pose_stability_window').value)))
+        self.target_collection_cooldown_until: Optional[float] = None
+        self.target_collection_cooldown_logged = False
+        self.last_end_pose_stability_log_time: Optional[float] = None
         self.last_joint_pos: Optional[list] = None
         self.last_joint_vel: Optional[list] = None
         self.executor_status = 'IDLE'
@@ -168,6 +174,10 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('blend_approach_retry_on_busy', True)
         self.declare_parameter('blend_approach_busy_retry_delay_sec', 1.5)
         self.declare_parameter('blend_approach_busy_max_retries', 3)
+        self.declare_parameter('enable_top_down_fallback', True)
+        self.declare_parameter('top_down_max_target_z', 0.49)
+        self.declare_parameter('top_down_max_pre_grasp_radius_m', 0.64)
+        self.declare_parameter('top_down_pre_grasp_z_offset', 0.035)
         self.declare_parameter('continue_with_last_seen_during_motion', True)
         self.declare_parameter('table_z', 0.0)
         self.declare_parameter('table_clearance', 0.04)
@@ -201,6 +211,13 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('stable_position_threshold', 0.015)
         self.declare_parameter('stable_position_threshold_m', 0.015)
         self.declare_parameter('stable_depth_threshold_m', 0.03)
+        self.declare_parameter('target_stability_window', 8)
+        self.declare_parameter('target_stability_min_samples', 5)
+        self.declare_parameter('target_stability_max_range_x', 0.015)
+        self.declare_parameter('target_stability_max_range_y', 0.012)
+        self.declare_parameter('target_stability_max_range_z', 0.015)
+        self.declare_parameter('target_outlier_reject_distance', 0.04)
+        self.declare_parameter('visual_sanity_max_radius_m', 0.64)
         self.declare_parameter('target_timeout_sec', 1.0)
         self.declare_parameter('end_pose_timeout_sec', 1.0)
         self.declare_parameter('use_last_seen_target_on_loss', True)
@@ -208,6 +225,14 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('last_seen_target_max_age_sec', 8.0)
         self.declare_parameter('update_target_during_motion', False)
         self.declare_parameter('freeze_target_before_close', True)
+        self.declare_parameter('ignore_visual_during_motion', True)
+        self.declare_parameter('clear_target_window_on_cycle_start', True)
+        self.declare_parameter('clear_target_window_on_cycle_end', True)
+        self.declare_parameter('inter_cycle_cooldown_sec', 2.0)
+        self.declare_parameter('require_idle_before_target_collection', True)
+        self.declare_parameter('require_end_pose_stable_before_target_collection', True)
+        self.declare_parameter('end_pose_stability_window', 5)
+        self.declare_parameter('end_pose_stability_epsilon_m', 0.003)
         self.declare_parameter('max_target_jump_m', 0.08)
         self.declare_parameter('max_target_z_jump_m', 0.08)
 
@@ -253,6 +278,7 @@ class GraspTaskOpenLoop(Node):
     def _config_dict(self) -> dict:
         return {
             'pre_grasp_z_offset': self.get_parameter('pre_grasp_z_offset').value,
+            'top_down_pre_grasp_z_offset': self.get_parameter('top_down_pre_grasp_z_offset').value,
             'grasp_z_offset': self.get_parameter('grasp_z_offset').value,
             'lift_z_offset': self.get_parameter('lift_z_offset').value,
             'safe_pose': self.get_parameter('safe_pose').value,
@@ -294,6 +320,16 @@ class GraspTaskOpenLoop(Node):
         self.latest_target = msg
         self.latest_target_time = now_sec
 
+        if bool(self.get_parameter('ignore_visual_during_motion').value) and self.task_state != 'WAIT_PRE_TARGET':
+            self.get_logger().debug('Vision collection disabled during motion.')
+            return
+
+        if not self._target_collection_allowed():
+            return
+
+        if not self._valid_target(msg):
+            return
+
         obs = TargetObservation(
             x=float(msg.x),
             y=float(msg.y),
@@ -305,6 +341,28 @@ class GraspTaskOpenLoop(Node):
             object_name=str(getattr(msg, "object_name", "duck")),
         )
 
+        radius = self.planner.compute_radius([obs.x, obs.y, obs.z])
+        max_radius = self._param_float('visual_sanity_max_radius_m')
+        if radius > max_radius:
+            self.get_logger().warning(
+                f'Visual sanity check: radius={radius:.3f}, max={max_radius:.3f}, '
+                'decision=rejected')
+            self._target_mgr.reset_stability()
+            return
+        self.get_logger().debug(
+            f'Visual sanity check: radius={radius:.3f}, max={max_radius:.3f}, '
+            'decision=accepted')
+
+        median_before = self._target_mgr.window_median_xyz()
+        if median_before is not None:
+            outlier_dist = self._distance([obs.x, obs.y, obs.z], median_before)
+            if outlier_dist > self._param_float('target_outlier_reject_distance'):
+                self.get_logger().warning(
+                    f'Target stability window: samples={self._target_mgr.sample_count()}, '
+                    f'range={self._fmt_range(self._target_mgr.window_range())}, '
+                    f'median={self._fmt_xyz(median_before)}, decision=rejected, '
+                    f'reason=outlier distance {outlier_dist:.3f}m.')
+
         accepted = self._target_mgr.accept_observation(
             obs,
             now_sec,
@@ -313,6 +371,7 @@ class GraspTaskOpenLoop(Node):
         )
 
         if not accepted:
+            self._log_target_stability_window('rejected')
             return
 
         target_base = [obs.x, obs.y, obs.z]
@@ -327,6 +386,8 @@ class GraspTaskOpenLoop(Node):
         stable = self._target_mgr.get_stable_target()
         if stable is not None:
             self._ctx.stable_target = stable
+        self._log_target_stability_window(
+            'accepted' if stable is not None else 'rejected')
 
         # 运动过程中通常不更新 active_target_base
         updatable_states = (
@@ -379,6 +440,7 @@ class GraspTaskOpenLoop(Node):
             float(msg.pose.position.z),
         ]
         self.last_end_pose_time = self._now_sec()
+        self.end_pose_stability_window.append(list(self.last_end_pose))
 
     def executor_status_callback(self, msg: String):
         self.executor_status = msg.data.strip().upper()
@@ -531,13 +593,16 @@ class GraspTaskOpenLoop(Node):
             self._activate_selected_plan(plan, self._fixed_target_xyz() or self.pre_target)
             self.current_approach_mode = plan.approach_mode
             self.planner.set_approach_mode(plan.approach_mode)
+            self.target_frozen = True
+            self._target_mgr.freeze()
             self.stage_full_goal = None
             self.blend_waypoints = None
             self.get_logger().info(
-                f'Pre target stable: {self._fmt_xyz(self.pre_target)}; '
+                'Frozen target selected from stability window: '
+                f'{self._fmt_xyz(self.pre_target)}; '
                 f'fixed_target_snapshot={self._fmt_xyz(self._fixed_target_xyz())}')
             self.get_logger().info(
-                f'Selected plan_id={plan.plan_id}, approach_mode={plan.approach_mode}: '
+                f'Selected plan frozen: plan_id={plan.plan_id}, mode={plan.approach_mode}, '
                 f'pre_grasp={self._fmt_xyz(plan.pre_grasp)}, '
                 f'grasp={self._fmt_xyz(plan.grasp)}, lift_goal={self._fmt_xyz(plan.lift_goal)}')
             self._transition('PRE_OPEN_GRIPPER')
@@ -722,19 +787,27 @@ class GraspTaskOpenLoop(Node):
         self.planner.last_attempted_pre_grasp = None
         self.planner.last_attempted_grasp = None
         try:
+            if mode == 'top_down':
+                allowed, reason = self._top_down_fallback_allowed(target)
+                if not allowed:
+                    result.reason = reason
+                    self.last_target_failure_reason = reason
+                    return result
             if not self._validate_grasp_start_constraints(target, log_errors=False):
                 result.reason = self.last_target_failure_reason or 'grasp start constraints failed'
                 return result
             result.pre_grasp = self.planner.compute_safe_pre_grasp(target)
+            if mode == 'top_down':
+                pre_radius = self.planner.compute_radius(result.pre_grasp)
+                max_radius = self._param_float('top_down_max_pre_grasp_radius_m')
+                if pre_radius > max_radius:
+                    result.reason = (
+                        f'top_down pre_grasp radius={pre_radius:.3f}m exceeds '
+                        f'top_down_max_pre_grasp_radius_m={max_radius:.3f}m')
+                    self.last_target_failure_reason = result.reason
+                    return result
             result.grasp = self.planner.compute_safe_grasp(target)
-            result.lift_goal = self.planner.validate_waypoint(
-                [
-                    result.grasp[0],
-                    result.grasp[1],
-                    max(result.grasp[2] + self._param_float('lift_z_offset'), self.planner.safe_motion_z),
-                ],
-                label='lift_goal',
-            )
+            result.lift_goal = self._compute_lift_goal_for_plan(result)
             if not self._log_plan_radius_check(result):
                 return result
             result.ok = True
@@ -753,6 +826,45 @@ class GraspTaskOpenLoop(Node):
             result.reason = str(exc)
             self.last_target_failure_reason = result.reason
             return result
+
+    def _top_down_fallback_allowed(self, target: list) -> tuple:
+        if not bool(self.get_parameter('enable_top_down_fallback').value):
+            return False, 'top_down fallback disabled by enable_top_down_fallback=false'
+        max_z = self._param_float('top_down_max_target_z')
+        if float(target[2]) > max_z:
+            return (
+                False,
+                f'top_down rejected: target.z={float(target[2]):.3f} exceeds '
+                f'top_down_max_target_z={max_z:.3f}',
+            )
+        return True, 'top_down fallback allowed'
+
+    def _compute_lift_goal_for_plan(self, result: PlanningResult) -> list:
+        lift_offset = self._param_float('lift_z_offset')
+        grasp_z = float(result.grasp[2])
+        pre_z = float(result.pre_grasp[2])
+        raw_z = grasp_z + lift_offset
+        if result.approach_mode == 'top_down':
+            lift_z = min(pre_z, raw_z)
+        else:
+            lift_z = raw_z
+        lift_goal = [float(result.grasp[0]), float(result.grasp[1]), float(lift_z)]
+        if not self._in_workspace(lift_goal):
+            raise ValueError(
+                f'lift_goal outside workspace: {self._fmt_xyz(lift_goal)}, '
+                f'workspace_limits={self.planner.workspace_limits}')
+        if lift_z < self.planner.safe_motion_z:
+            self.get_logger().warning(
+                'MOVE_LIFT goal generation below safe_motion_z; later motion validation may clamp. '
+                f'approach_mode={result.approach_mode}, grasp_z={grasp_z:.3f}, '
+                f'pre_grasp_z={pre_z:.3f}, configured_lift_z_offset={lift_offset:.3f}, '
+                f'lift_goal_z={lift_z:.3f}, safe_motion_z={self.planner.safe_motion_z:.3f}.')
+        self.get_logger().info(
+            'MOVE_LIFT goal generation: '
+            f'approach_mode={result.approach_mode}, '
+            f'grasp_z={grasp_z:.3f}, pre_grasp_z={pre_z:.3f}, '
+            f'configured_lift_z_offset={lift_offset:.3f}, lift_goal_z={lift_z:.3f}.')
+        return lift_goal
 
     def _go_to_pre_grasp_after_open(self):
         if self.selected_plan is None or not self.selected_plan.ok:
@@ -1713,6 +1825,67 @@ class GraspTaskOpenLoop(Node):
 
         return True
 
+    def _target_collection_allowed(self) -> bool:
+        now = self._now_sec()
+        if self.task_state != 'WAIT_PRE_TARGET':
+            return False
+
+        if self.target_collection_cooldown_until is not None:
+            if now < self.target_collection_cooldown_until:
+                return False
+            if not self.target_collection_cooldown_logged:
+                self.target_collection_cooldown_logged = True
+                self.get_logger().info(
+                    'Inter-cycle cooldown finished; target collection enabled.')
+
+        if (
+            bool(self.get_parameter('require_idle_before_target_collection').value)
+            and self.executor_status != 'IDLE'
+        ):
+            return False
+
+        if bool(self.get_parameter('require_end_pose_stable_before_target_collection').value):
+            ok, samples, ranges = self._end_pose_stable_for_collection()
+            now = self._now_sec()
+            if (
+                self.last_end_pose_stability_log_time is None
+                or now - self.last_end_pose_stability_log_time >= self._param_float('status_log_period_sec')
+            ):
+                self.last_end_pose_stability_log_time = now
+                self.get_logger().info(
+                    f'End pose stability: samples={samples}, '
+                    f'range={self._fmt_range(ranges)}, '
+                    f'decision={"accepted" if ok else "rejected"}.')
+            if not ok:
+                return False
+
+        return True
+
+    def _end_pose_stable_for_collection(self) -> tuple:
+        required = self._param_int('end_pose_stability_window')
+        samples = len(self.end_pose_stability_window)
+        if samples < required:
+            return False, samples, (0.0, 0.0, 0.0)
+        xs = [pose[0] for pose in self.end_pose_stability_window]
+        ys = [pose[1] for pose in self.end_pose_stability_window]
+        zs = [pose[2] for pose in self.end_pose_stability_window]
+        ranges = (
+            max(xs) - min(xs),
+            max(ys) - min(ys),
+            max(zs) - min(zs),
+        )
+        epsilon = self._param_float('end_pose_stability_epsilon_m')
+        return all(value <= epsilon for value in ranges), samples, ranges
+
+    def _log_target_stability_window(self, decision_hint: str):
+        ok, reason, samples, ranges, median = self._target_mgr.stability_decision()
+        decision = 'accepted' if ok else decision_hint
+        self.get_logger().info(
+            f'Target stability window: samples={samples}, '
+            f'range={self._fmt_range(ranges)}, '
+            f'median={self._fmt_xyz(median)}, '
+            f'decision={decision}, reason={reason}.')
+
     def _handle_approach_failure(self, reason: str):
         approach_states = ('MOVE_APPROACH_BLEND', 'MOVE_PRE_GRASP', 'MOVE_GRASP')
         if self.task_state not in approach_states:
@@ -1732,7 +1905,7 @@ class GraspTaskOpenLoop(Node):
             and 'top_down' in priority
             and 'top_down' not in self.approach_failed_modes
         ):
-            target = self._fixed_target_xyz() or self.pre_target or self.active_target_base
+            target = self._fixed_target_xyz() or self.pre_target
             if target is None:
                 self._clear_selected_plan('front fallback has no target for top_down preflight')
                 self._enter_recover('front fallback has no target for top_down preflight')
@@ -1744,11 +1917,15 @@ class GraspTaskOpenLoop(Node):
             fallback_plan = self._try_plan_mode(target, 'top_down')
             if not fallback_plan.ok:
                 self._clear_selected_plan('top_down fallback preflight failed')
-                self._enter_recover(
-                    f'top_down fallback preflight failed: {fallback_plan.reason}')
+                self.get_logger().warning(
+                    f'top_down fallback preflight failed: {fallback_plan.reason}; '
+                    'return to WAIT_PRE_TARGET and collect a new stable target window.')
+                self._target_mgr.reset_stability()
+                self._transition('WAIT_PRE_TARGET', clear_window=True)
                 return
             self._activate_selected_plan(fallback_plan, target)
-            self.target_frozen = False
+            self.target_frozen = True
+            self._target_mgr.freeze()
             self.active_motion_goal = None
             self._reset_stage_vars()
             if self.executor_status == 'ERROR':
@@ -1856,7 +2033,12 @@ class GraspTaskOpenLoop(Node):
         self.active_target_base = None
         self.target_frozen = False
         self.active_motion_goal = None
-        self._target_mgr.reset_stability()
+        if bool(self.get_parameter('clear_target_window_on_cycle_end').value):
+            self._clear_target_window('after cycle')
+            cooldown = self._param_float('inter_cycle_cooldown_sec')
+            if cooldown > 0.0:
+                self.target_collection_cooldown_until = self._now_sec() + cooldown
+                self.target_collection_cooldown_logged = False
         self.pending_speed_profile = None
         self.recover_phase = 'OPEN_GRIPPER'
         self.recover_reason = 'idle'
@@ -1886,6 +2068,10 @@ class GraspTaskOpenLoop(Node):
         self._ctx.fixed_target_snapshot = None
         self._reset_stage_vars()
 
+    def _clear_target_window(self, reason: str):
+        self._target_mgr.reset_stability()
+        self.get_logger().info(f'Target window cleared {reason}.')
+
     def _clear_selected_plan(self, reason: str):
         if self.selected_plan is not None:
             self.get_logger().debug(
@@ -1908,7 +2094,8 @@ class GraspTaskOpenLoop(Node):
         if clear_window:
             if new_state == 'WAIT_PRE_TARGET':
                 self._clear_selected_plan('enter WAIT_PRE_TARGET with clear_window=true')
-            self._target_mgr.reset_stability()
+            if bool(self.get_parameter('clear_target_window_on_cycle_start').value):
+                self._clear_target_window('after cycle' if old_state in ('IDLE', 'RECOVER') else 'on cycle start')
         if old_state != new_state:
             self.rejected_busy_count = 0
             if new_state == 'MOVE_APPROACH_BLEND':
@@ -2076,6 +2263,12 @@ class GraspTaskOpenLoop(Node):
     @staticmethod
     def _fmt_xyz(xyz: list) -> str:
         return fmt_xyz(xyz)
+
+    @staticmethod
+    def _fmt_range(values) -> str:
+        if values is None:
+            return 'None'
+        return f'({float(values[0]):.3f},{float(values[1]):.3f},{float(values[2]):.3f})'
 
 
 def main(args=None):

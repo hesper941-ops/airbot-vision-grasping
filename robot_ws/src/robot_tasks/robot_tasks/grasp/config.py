@@ -74,6 +74,13 @@ class GraspTaskConfig:
     stable_frame_count_required: int = 5
     stable_position_threshold_m: float = 0.015
     stable_depth_threshold_m: float = 0.03
+    target_stability_window: int = 8
+    target_stability_min_samples: int = 5
+    target_stability_max_range_x: float = 0.015
+    target_stability_max_range_y: float = 0.012
+    target_stability_max_range_z: float = 0.015
+    target_outlier_reject_distance: float = 0.04
+    visual_sanity_max_radius_m: float = 0.64
     confidence_threshold: float = 0.7
     target_timeout_sec: float = 1.0
     max_target_jump_m: float = 0.08
@@ -86,6 +93,14 @@ class GraspTaskConfig:
     update_target_during_motion: bool = False
     freeze_target_before_close: bool = True
     continue_with_last_seen_during_motion: bool = True
+    ignore_visual_during_motion: bool = True
+    clear_target_window_on_cycle_start: bool = True
+    clear_target_window_on_cycle_end: bool = True
+    inter_cycle_cooldown_sec: float = 2.0
+    require_idle_before_target_collection: bool = True
+    require_end_pose_stable_before_target_collection: bool = True
+    end_pose_stability_window: int = 5
+    end_pose_stability_epsilon_m: float = 0.003
 
     # -- Approach planning ---------------------------------------------------
     approach_mode: str = "front"
@@ -97,6 +112,10 @@ class GraspTaskConfig:
     blend_approach_retry_on_busy: bool = True
     blend_approach_busy_retry_delay_sec: float = 1.5
     blend_approach_busy_max_retries: int = 3
+    enable_top_down_fallback: bool = True
+    top_down_max_target_z: float = 0.49
+    top_down_max_pre_grasp_radius_m: float = 0.64
+    top_down_pre_grasp_z_offset: float = 0.035
 
     # Geometry (meters)
     pre_grasp_z_offset: float = 0.06
@@ -235,6 +254,13 @@ class GraspTaskConfig:
             stable_frame_count_required=_pi("stable_frame_count_required", 5),
             stable_position_threshold_m=_pf("stable_position_threshold_m", 0.015),
             stable_depth_threshold_m=_pf("stable_depth_threshold_m", 0.03),
+            target_stability_window=_pi("target_stability_window", 8),
+            target_stability_min_samples=_pi("target_stability_min_samples", 5),
+            target_stability_max_range_x=_pf("target_stability_max_range_x", 0.015),
+            target_stability_max_range_y=_pf("target_stability_max_range_y", 0.012),
+            target_stability_max_range_z=_pf("target_stability_max_range_z", 0.015),
+            target_outlier_reject_distance=_pf("target_outlier_reject_distance", 0.04),
+            visual_sanity_max_radius_m=_pf("visual_sanity_max_radius_m", 0.64),
             confidence_threshold=_pf("confidence_threshold", 0.7),
             target_timeout_sec=_pf("target_timeout_sec", 1.0),
             max_target_jump_m=_pf("max_target_jump_m", 0.08),
@@ -246,6 +272,15 @@ class GraspTaskConfig:
             update_target_during_motion=_pb("update_target_during_motion", False),
             freeze_target_before_close=_pb("freeze_target_before_close", True),
             continue_with_last_seen_during_motion=_pb("continue_with_last_seen_during_motion", True),
+            ignore_visual_during_motion=_pb("ignore_visual_during_motion", True),
+            clear_target_window_on_cycle_start=_pb("clear_target_window_on_cycle_start", True),
+            clear_target_window_on_cycle_end=_pb("clear_target_window_on_cycle_end", True),
+            inter_cycle_cooldown_sec=_pf("inter_cycle_cooldown_sec", 2.0),
+            require_idle_before_target_collection=_pb("require_idle_before_target_collection", True),
+            require_end_pose_stable_before_target_collection=_pb(
+                "require_end_pose_stable_before_target_collection", True),
+            end_pose_stability_window=_pi("end_pose_stability_window", 5),
+            end_pose_stability_epsilon_m=_pf("end_pose_stability_epsilon_m", 0.003),
 
             approach_mode=str(_p("approach_mode", "front")),
             approach_priority=list(_p("approach_priority", ["front", "top_down"])),
@@ -259,6 +294,10 @@ class GraspTaskConfig:
                 "blend_approach_busy_retry_delay_sec", 1.5),
             blend_approach_busy_max_retries=_pi(
                 "blend_approach_busy_max_retries", 3),
+            enable_top_down_fallback=_pb("enable_top_down_fallback", True),
+            top_down_max_target_z=_pf("top_down_max_target_z", 0.49),
+            top_down_max_pre_grasp_radius_m=_pf("top_down_max_pre_grasp_radius_m", 0.64),
+            top_down_pre_grasp_z_offset=_pf("top_down_pre_grasp_z_offset", 0.035),
 
             pre_grasp_z_offset=_pf("pre_grasp_z_offset", 0.06),
             grasp_z_offset=_pf("grasp_z_offset", 0.02),

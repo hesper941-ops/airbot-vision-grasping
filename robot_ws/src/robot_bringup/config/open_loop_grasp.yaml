@@ -72,6 +72,13 @@ grasp_task_open_loop:
     stable_position_threshold: 0.015
     stable_position_threshold_m: 0.015
     stable_depth_threshold_m: 0.03
+    target_stability_window: 8
+    target_stability_min_samples: 5
+    target_stability_max_range_x: 0.015
+    target_stability_max_range_y: 0.012
+    target_stability_max_range_z: 0.015
+    target_outlier_reject_distance: 0.04
+    visual_sanity_max_radius_m: 0.64
     target_timeout_sec: 1.0
 
     # 单帧跳变大于此阈值则拒绝该帧并重置稳定计数 (meter).
@@ -88,6 +95,14 @@ grasp_task_open_loop:
     update_target_during_motion: false
     freeze_target_before_close: true
     continue_with_last_seen_during_motion: true
+    ignore_visual_during_motion: true
+    clear_target_window_on_cycle_start: true
+    clear_target_window_on_cycle_end: true
+    inter_cycle_cooldown_sec: 2.0
+    require_idle_before_target_collection: true
+    require_end_pose_stable_before_target_collection: true
+    end_pose_stability_window: 5
+    end_pose_stability_epsilon_m: 0.003
 
     # ==================================================================
     # [2.4] Approach planning (抓取方向规划)
@@ -109,6 +124,10 @@ grasp_task_open_loop:
     blend_approach_retry_on_busy: true
     blend_approach_busy_retry_delay_sec: 1.5
     blend_approach_busy_max_retries: 3
+    enable_top_down_fallback: true
+    top_down_max_target_z: 0.49
+    top_down_max_pre_grasp_radius_m: 0.64
+    top_down_pre_grasp_z_offset: 0.035
 
     # 预抓取 / 抓取 / 抬升 / 前方靠近偏移量 (meter).
     pre_grasp_z_offset: 0.06
