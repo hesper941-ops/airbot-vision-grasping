@@ -147,9 +147,9 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('base_frame', 'base_link')
         self.declare_parameter('allow_empty_target_frame', False)
 
-        self.declare_parameter('pre_grasp_z_offset', 0.14)
+        self.declare_parameter('pre_grasp_z_offset', 0.10)
         self.declare_parameter('grasp_z_offset', 0.02)
-        self.declare_parameter('lift_z_offset', 0.12)
+        self.declare_parameter('lift_z_offset', 0.10)
         self.declare_parameter('safe_pose', [0.35, 0.0, 0.35])
         self.declare_parameter('approach_mode', 'front')
         self.declare_parameter('approach_priority', ['front', 'top_down'])
@@ -220,6 +220,8 @@ class GraspTaskOpenLoop(Node):
         # Cartesian step-by-step: each command limited to this distance.
         # Must be smaller than AirbotWrapper's 0.100 m single-step safety limit.
         self.declare_parameter('max_cartesian_step', 0.04)
+        self.declare_parameter('cart_waypoint_max_step_m', 0.09)
+        self.declare_parameter('cart_waypoint_safe_limit_m', 0.10)
 
         self.declare_parameter('wait_pre_target_warn_sec', 15.0)
         self.declare_parameter('motion_timeout_sec', 16.0)
@@ -762,11 +764,17 @@ class GraspTaskOpenLoop(Node):
             if not self._executor_accepting():
                 return
             try:
+                max_segment = self._max_segment_length(
+                    self.last_end_pose, self.blend_waypoints)
                 self.get_logger().info(
                     f'[GRASP] MOVE_APPROACH_BLEND plan_id={self._selected_plan_id()}, '
-                    f'approach_mode={self.current_approach_mode}, '
-                    f'cart_waypoints=true, waypoints={self._fmt_waypoints(self.blend_waypoints)}')
-                self._publish_cart_waypoints(self.blend_waypoints)
+                    f'waypoint_count={len(self.blend_waypoints)}, '
+                    f'max_segment={max_segment:.3f}, '
+                    f'first={self._fmt_xyz(self.blend_waypoints[0])}, '
+                    f'pre_grasp={self._fmt_xyz(self.selected_plan.pre_grasp)}, '
+                    f'final={self._fmt_xyz(self.blend_waypoints[-1])}')
+                self._publish_cart_waypoints(
+                    self.blend_waypoints, reason='blend_approach')
             except Exception as exc:
                 self.get_logger().error(
                     f'MOVE_APPROACH_BLEND publish failed: {exc}')
@@ -807,27 +815,81 @@ class GraspTaskOpenLoop(Node):
             is_final_grasp=True,
             label='selected_plan.grasp',
         )
-        waypoints = [pre_grasp, grasp]
-
-        if self.last_end_pose is not None:
-            current_z = float(self.last_end_pose[2])
-            safe_z = float(self.planner.safe_motion_z)
-            target_z = float(self.selected_plan.target_snapshot[2]) if self.selected_plan.target_snapshot else float(grasp[2])
-            if current_z < safe_z or current_z + 1e-6 < target_z:
-                lift_first = self.planner.validate_waypoint(
-                    [
-                        float(self.last_end_pose[0]),
-                        float(self.last_end_pose[1]),
-                        safe_z,
-                    ],
-                    is_final_grasp=False,
-                    label='blend_lift_first',
-                )
-                waypoints.insert(0, lift_first)
+        waypoints = self._build_blended_approach_waypoints(
+            self.last_end_pose, pre_grasp, grasp)
 
         if len(waypoints) < 2:
             raise ValueError('cart_waypoints requires at least 2 points')
         return waypoints
+
+    def _build_blended_approach_waypoints(
+        self,
+        current_xyz: list,
+        pre_grasp: list,
+        grasp: list,
+    ) -> list:
+        if current_xyz is None or len(current_xyz) != 3:
+            raise ValueError('fresh current end_pose is required for cart_waypoints')
+
+        max_step = self._param_float('cart_waypoint_max_step_m')
+        safe_limit = self._param_float('cart_waypoint_safe_limit_m')
+        if max_step <= 0.0:
+            raise ValueError('cart_waypoint_max_step_m must be positive')
+        if safe_limit <= 0.0:
+            raise ValueError('cart_waypoint_safe_limit_m must be positive')
+        if max_step > safe_limit:
+            raise ValueError(
+                f'cart_waypoint_max_step_m={max_step:.3f} exceeds '
+                f'cart_waypoint_safe_limit_m={safe_limit:.3f}')
+
+        current = [float(v) for v in current_xyz]
+        pre = [float(v) for v in pre_grasp]
+        final = [float(v) for v in grasp]
+
+        waypoints = []
+        waypoints.extend(self._interpolate_segment(current, pre, max_step))
+        waypoints.extend(self._interpolate_segment(pre, final, max_step))
+
+        if not waypoints or self._distance(waypoints[-1], final) > 1e-9:
+            waypoints.append(final)
+
+        max_segment = self._max_segment_length(current, waypoints)
+        if max_segment > safe_limit + 1e-9:
+            raise ValueError(
+                f'cart_waypoints max_segment={max_segment:.3f} exceeds '
+                f'safe_limit={safe_limit:.3f}')
+        if not any(self._distance(point, pre) <= 1e-9 for point in waypoints):
+            raise ValueError('pre_grasp is missing from cart_waypoints')
+        if self._distance(waypoints[-1], final) > 1e-9:
+            raise ValueError('final cart waypoint is not selected_plan.grasp')
+        return waypoints
+
+    def _interpolate_segment(self, start: list, end: list, max_step: float) -> list:
+        distance = self._distance(start, end)
+        if distance <= 1e-9:
+            return []
+        steps = max(1, int(math.ceil(distance / max_step)))
+        points = []
+        for index in range(1, steps + 1):
+            ratio = float(index) / float(steps)
+            points.append([
+                float(start[0]) + (float(end[0]) - float(start[0])) * ratio,
+                float(start[1]) + (float(end[1]) - float(start[1])) * ratio,
+                float(start[2]) + (float(end[2]) - float(start[2])) * ratio,
+            ])
+        return points
+
+    def _max_segment_length(self, current_xyz: list, waypoints: list) -> float:
+        if current_xyz is None or not waypoints:
+            return 0.0
+        max_segment = 0.0
+        previous = [float(v) for v in current_xyz]
+        for point in waypoints:
+            segment = self._distance(previous, point)
+            if segment > max_segment:
+                max_segment = segment
+            previous = point
+        return max_segment
 
     def _handle_move_pre_grasp(self):
         if self.stage_full_goal is not None:

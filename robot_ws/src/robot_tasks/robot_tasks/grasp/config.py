@@ -96,9 +96,9 @@ class GraspTaskConfig:
     blend_approach_fallback_to_sequential: bool = True
 
     # Geometry (meters)
-    pre_grasp_z_offset: float = 0.14
+    pre_grasp_z_offset: float = 0.10
     grasp_z_offset: float = 0.02
-    lift_z_offset: float = 0.12
+    lift_z_offset: float = 0.10
     front_approach_x_offset: float = -0.10
     front_approach_z_offset: float = 0.05
     adaptive_front_pre_grasp: bool = True
@@ -147,6 +147,8 @@ class GraspTaskConfig:
 
     # -- Motion control ------------------------------------------------------
     max_cartesian_step: float = 0.04
+    cart_waypoint_max_step_m: float = 0.09
+    cart_waypoint_safe_limit_m: float = 0.10
     position_tolerance_m: float = 0.015
     settle_time_sec: float = 0.8
     joint_speed_safe_threshold: float = 0.1
@@ -247,9 +249,9 @@ class GraspTaskConfig:
             blend_approach_fallback_to_sequential=_pb(
                 "blend_approach_fallback_to_sequential", True),
 
-            pre_grasp_z_offset=_pf("pre_grasp_z_offset", 0.14),
+            pre_grasp_z_offset=_pf("pre_grasp_z_offset", 0.10),
             grasp_z_offset=_pf("grasp_z_offset", 0.02),
-            lift_z_offset=_pf("lift_z_offset", 0.12),
+            lift_z_offset=_pf("lift_z_offset", 0.10),
             front_approach_x_offset=_pf("front_approach_x_offset", -0.10),
             front_approach_z_offset=_pf("front_approach_z_offset", 0.05),
             adaptive_front_pre_grasp=_pb("adaptive_front_pre_grasp", True),
@@ -289,6 +291,8 @@ class GraspTaskConfig:
             return_init_timeout_sec=_pf("return_init_timeout_sec", 10.0),
 
             max_cartesian_step=_pf("max_cartesian_step", 0.04),
+            cart_waypoint_max_step_m=_pf("cart_waypoint_max_step_m", 0.09),
+            cart_waypoint_safe_limit_m=_pf("cart_waypoint_safe_limit_m", 0.10),
             position_tolerance_m=_pf("position_tolerance_m", 0.015),
             settle_time_sec=_pf("settle_time_sec", 0.8),
             joint_speed_safe_threshold=_pf("joint_speed_safe_threshold", 0.1),
