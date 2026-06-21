@@ -14,6 +14,7 @@ not applied so that the task layer always receives clear feedback.
 
 import math
 import threading
+import time
 import traceback
 from typing import Any, Optional, Tuple
 
@@ -60,6 +61,10 @@ class ArmExecutorNode(Node):
         )
         self.declare_parameter('rescue_warning_margin_rad', 0.20)
         self.declare_parameter('rescue_safe_margin_rad', 0.40)
+        self.declare_parameter('sdk_ready_check_enabled', True)
+        self.declare_parameter('sdk_ready_wait_timeout_sec', 3.0)
+        self.declare_parameter('sdk_ready_poll_interval_sec', 0.10)
+        self.declare_parameter('post_sdk_motion_settle_sec', 0.8)
 
         self.arm = AirbotWrapper(url='localhost', port=50001)
         self.sdk_lock = threading.Lock()
@@ -68,6 +73,7 @@ class ArmExecutorNode(Node):
         self.active_thread = None
         self.last_state_msg = None
         self.last_pose_msg = None
+        self.last_sdk_motion_finish_time = None
 
         self.state_pub = self.create_publisher(
             ArmJointState, '/robot_arm/joint_state', 10)
@@ -463,6 +469,12 @@ class ArmExecutorNode(Node):
                 self._publish_executor_status_locked(self.executor_state)
                 return
 
+            if self.active_thread is not None and self.active_thread.is_alive():
+                self.get_logger().warning(
+                    'clear_error received while active command is still running; keep ERROR.')
+                self._publish_executor_status_locked(self.ERROR)
+                return
+
             self.get_logger().warning('clear_error received; executor ERROR cleared to IDLE.')
             self._publish_executor_status_locked(self.IDLE)
 
@@ -502,10 +514,16 @@ class ArmExecutorNode(Node):
         try:
             with self.sdk_lock:
                 if command_type == 'joint':
+                    if not self._wait_until_sdk_ready(command_type):
+                        return
                     self.arm.move_joints(payload)
                 elif command_type == 'cartesian':
+                    if not self._wait_until_sdk_ready(command_type):
+                        return
                     self.arm.move_to_cart_target_with_current_orientation(payload)
                 elif command_type == 'cart_waypoints':
+                    if not self._wait_until_sdk_ready(command_type):
+                        return
                     self._debug_or_info(
                         'Executing cartesian waypoints with current orientation')
                     end_pose = self.arm.get_end_pose()
@@ -533,12 +551,23 @@ class ArmExecutorNode(Node):
                 else:
                     raise ValueError(f'Unsupported command type: {command_type}')
 
+                if command_type in ('joint', 'cartesian', 'cart_waypoints'):
+                    self.last_sdk_motion_finish_time = self._now_sec()
+
             self._debug_or_info(f'{command_type} command done.')
             self._debug_or_info(f'Executor status: DONE {command_type}')
             self._publish_executor_status(self.DONE)
         except Exception as exc:
             current_end_pose = self._current_end_pose_for_log()
             sdk_output = getattr(self.arm, 'last_sdk_output', '')
+            if self._is_sdk_busy_exception(exc, sdk_output):
+                self.get_logger().warning(
+                    f'SDK_BUSY / REJECTED_BUSY: command_type={command_type}, '
+                    f'target={payload}, current_end_pose={current_end_pose}, '
+                    f'captured SDK/logging output={sdk_output}: {exc}')
+                self._publish_executor_status(self.REJECTED_BUSY)
+                self._publish_executor_status(self.IDLE)
+                return
             if command_type == 'cart_waypoints':
                 self.get_logger().error(f'cart_waypoints failed: {exc}')
             self._set_error(
@@ -548,6 +577,72 @@ class ArmExecutorNode(Node):
             return
 
         self._publish_executor_status(self.IDLE)
+
+    def _wait_until_sdk_ready(self, command_type: str) -> bool:
+        if not bool(self.get_parameter('sdk_ready_check_enabled').value):
+            return True
+
+        timeout_sec = float(self.get_parameter('sdk_ready_wait_timeout_sec').value)
+        poll_sec = float(self.get_parameter('sdk_ready_poll_interval_sec').value)
+        settle_sec = float(self.get_parameter('post_sdk_motion_settle_sec').value)
+        start = self._now_sec()
+        last_state = 'unavailable'
+        last_logged_state = None
+
+        while self._now_sec() - start <= timeout_sec:
+            state_available = False
+            try:
+                last_state = str(self.arm.get_state())
+                state_available = True
+            except Exception as exc:
+                last_state = f'unavailable: {exc}'
+
+            if state_available:
+                state_text = last_state.strip().lower()
+                if last_state != last_logged_state:
+                    self.get_logger().info(
+                        f'SDK ready wait before {command_type}: arm_state={last_state}')
+                    last_logged_state = last_state
+                if self._sdk_state_accepting(state_text):
+                    return True
+                if not self._sdk_state_busy(state_text):
+                    return True
+            else:
+                if self.last_sdk_motion_finish_time is None:
+                    return True
+                if self._now_sec() - self.last_sdk_motion_finish_time >= settle_sec:
+                    return True
+
+            time.sleep(max(0.0, poll_sec))
+
+        self.get_logger().warning(
+            f'SDK not ready after {timeout_sec:.2f} sec; reject {command_type} '
+            f'as REJECTED_BUSY. arm_state={last_state}')
+        self._publish_executor_status(self.REJECTED_BUSY)
+        self._publish_executor_status(self.IDLE)
+        return False
+
+    @staticmethod
+    def _sdk_state_busy(state_text: str) -> bool:
+        busy_words = ('moving', 'busy', 'running', 'executing', 'planning')
+        return any(word in state_text for word in busy_words)
+
+    @staticmethod
+    def _sdk_state_accepting(state_text: str) -> bool:
+        ready_words = ('idle', 'ready', 'standby', 'stopped', 'stop')
+        return any(word in state_text for word in ready_words)
+
+    @staticmethod
+    def _is_sdk_busy_exception(exc: Exception, sdk_output: str) -> bool:
+        text = f'{sdk_output} {exc}'.lower()
+        if 'waiting for arm to finish moving' in text:
+            return True
+        if 'arm to finish moving' in text:
+            return True
+        return 'move group planning ptp failed' in text and 'waiting' in text
+
+    def _now_sec(self) -> float:
+        return self.get_clock().now().nanoseconds / 1e9
 
     # ------------------------------------------------------------------
     # State publishing

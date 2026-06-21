@@ -43,6 +43,10 @@ arm_executor_node:
     # 通用关节限位救援参数，由 arm_executor_node.py 读取
     rescue_warning_margin_rad: 0.20
     rescue_safe_margin_rad: 0.40
+    sdk_ready_check_enabled: true
+    sdk_ready_wait_timeout_sec: 3.0
+    sdk_ready_poll_interval_sec: 0.10
+    post_sdk_motion_settle_sec: 0.8
 
 
 # ======================================================================
@@ -102,6 +106,9 @@ grasp_task_open_loop:
     max_approach_mode_retries: 1
     blend_approach_enabled: true
     blend_approach_fallback_to_sequential: true
+    blend_approach_retry_on_busy: true
+    blend_approach_busy_retry_delay_sec: 1.5
+    blend_approach_busy_max_retries: 3
 
     # 预抓取 / 抓取 / 抬升 / 前方靠近偏移量 (meter).
     pre_grasp_z_offset: 0.10
@@ -203,6 +210,8 @@ grasp_task_open_loop:
     auto_recover_joint_limit: true
     recover_clear_error_interval_sec: 0.5
     recover_return_init_pose: true
+    post_motion_command_cooldown_sec: 1.5
+    sequential_busy_max_retries: 3
     rescue_warning_margin_rad: 0.20
     rescue_safe_margin_rad: 0.40
 

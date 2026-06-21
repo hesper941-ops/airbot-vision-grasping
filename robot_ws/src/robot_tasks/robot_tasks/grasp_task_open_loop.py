@@ -99,6 +99,14 @@ class GraspTaskOpenLoop(Node):
         self.recover_reset_command: Optional[str] = None
         self.last_reset_executor_time: Optional[float] = None
         self.rejected_busy_count = 0
+        self.blend_busy_retry_count = 0
+        self.blend_busy_retry_after: Optional[float] = None
+        self.cartesian_busy_retry_count = 0
+        self.cartesian_busy_retry_after: Optional[float] = None
+        self.recover_command_sent = False
+        self.recover_command_type: Optional[str] = None
+        self.recover_command_time: Optional[float] = None
+        self.recover_timeout_logged = False
         self.last_status_log_time: Optional[float] = None
         self.selected_plan: Optional[PlanningResult] = None
         self.plan_id_counter = 0
@@ -157,6 +165,9 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('max_approach_mode_retries', 1)
         self.declare_parameter('blend_approach_enabled', True)
         self.declare_parameter('blend_approach_fallback_to_sequential', True)
+        self.declare_parameter('blend_approach_retry_on_busy', True)
+        self.declare_parameter('blend_approach_busy_retry_delay_sec', 1.5)
+        self.declare_parameter('blend_approach_busy_max_retries', 3)
         self.declare_parameter('continue_with_last_seen_during_motion', True)
         self.declare_parameter('table_z', 0.0)
         self.declare_parameter('table_clearance', 0.04)
@@ -231,6 +242,8 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('rejected_busy_recover_threshold', 2)
         self.declare_parameter('recover_clear_error_interval_sec', 0.5)
         self.declare_parameter('auto_recover_joint_limit', True)
+        self.declare_parameter('post_motion_command_cooldown_sec', 1.5)
+        self.declare_parameter('sequential_busy_max_retries', 3)
         self.declare_parameter('loop_hz', 4.0)
         self.declare_parameter('verbose_debug', False)
         self.declare_parameter('status_log_period_sec', 2.0)
@@ -376,7 +389,11 @@ class GraspTaskOpenLoop(Node):
             if self.task_state == 'RECOVER':
                 return
             if self.task_state == 'MOVE_APPROACH_BLEND':
-                self._fallback_blend_to_sequential('executor returned REJECTED_BUSY')
+                self._schedule_blend_busy_retry('executor returned REJECTED_BUSY')
+                return
+            if self.task_state in ('MOVE_PRE_GRASP', 'MOVE_GRASP'):
+                self._schedule_cartesian_busy_retry(
+                    f'{self.task_state} executor returned REJECTED_BUSY')
                 return
             self.rejected_busy_count += 1
             threshold = int(self.get_parameter('rejected_busy_recover_threshold').value)
@@ -463,6 +480,14 @@ class GraspTaskOpenLoop(Node):
         WAIT_PRE_TARGET 是抓取前等待阶段。没有目标只表示视觉管线未运行，
         周期性 warning 并持续等待，不进入 RECOVER。
         """
+        if self.executor_status in ('ERROR', 'TIMEOUT'):
+            self.get_logger().error(
+                f'Executor status {self.executor_status} while waiting for target; '
+                'entering RECOVER before new planning.')
+            self._enter_recover(
+                f'executor_error: Executor status {self.executor_status}')
+            return
+
         warn_sec = self._param_float('wait_pre_target_warn_sec')
         if self._state_elapsed() > warn_sec:
             self.get_logger().warning(
@@ -742,8 +767,22 @@ class GraspTaskOpenLoop(Node):
             self._fallback_blend_to_sequential('MOVE_APPROACH_BLEND timeout')
             return
 
+        if self.blend_busy_retry_after is not None:
+            if self._now_sec() < self.blend_busy_retry_after:
+                return
+            self.blend_busy_retry_after = None
+            self.state_command_sent = False
+            self.stage_motion_started = False
+
         if self.pending_speed_profile is not None:
             return
+
+        if self.cartesian_busy_retry_after is not None:
+            if self._now_sec() < self.cartesian_busy_retry_after:
+                return
+            self.cartesian_busy_retry_after = None
+            self.state_command_sent = False
+            self.stage_motion_started = False
 
         if not self._fresh_end_pose_available():
             return
@@ -1265,31 +1304,48 @@ class GraspTaskOpenLoop(Node):
 
     def _handle_recover(self):
         if self._state_elapsed() > self._param_float('recover_timeout_sec'):
-            self.get_logger().error(
-                'RECOVER timeout; reset state to IDLE after best-effort recovery.')
+            if not self.recover_timeout_logged:
+                self.get_logger().error(
+                    'RECOVER timeout; reset state to IDLE after best-effort recovery.')
+                self.recover_timeout_logged = True
             self.grasp_closed = False
             self._reset_cycle()
             self._transition('IDLE')
             return
 
-        if self.executor_status == 'ERROR':
-            now = self._now_sec()
-            interval_sec = self._param_float('recover_clear_error_interval_sec')
-            if (
-                self.last_reset_executor_time is None
-                or now - self.last_reset_executor_time >= interval_sec
-            ):
+        if self.executor_status == 'BUSY':
+            self.get_logger().warning(
+                'RECOVER: executor BUSY, waiting for current recover command.')
+            return
+
+        if self.executor_status in ('ERROR', 'TIMEOUT'):
+            if not self.recover_command_sent:
                 reset_command = 'clear_error'
                 if bool(self.get_parameter('auto_recover_joint_limit').value):
                     reset_command = 'recover_joint_limit'
                 self._publish_reset_executor(reset_command)
-                self.last_reset_executor_time = now
+                self.last_reset_executor_time = self._now_sec()
+                self.recover_command_sent = True
+                self.recover_command_type = reset_command
+                self.recover_command_time = self.last_reset_executor_time
                 if reset_command == 'recover_joint_limit':
                     self.get_logger().warning(
                         'RECOVER: request recover_joint_limit')
                 else:
                     self.get_logger().warning(
                         'RECOVER: clear executor error.')
+            else:
+                now = self._now_sec()
+                log_interval = max(
+                    3.0, self._param_float('recover_clear_error_interval_sec'))
+                if (
+                    self.last_reset_executor_time is None
+                    or now - self.last_reset_executor_time >= log_interval
+                ):
+                    self.last_reset_executor_time = now
+                    self.get_logger().warning(
+                        f'RECOVER: {self.recover_command_type} already sent; '
+                        'not resending.')
             if self.recover_phase.startswith('KEEP_CLOSED'):
                 return
             return
@@ -1453,34 +1509,35 @@ class GraspTaskOpenLoop(Node):
             if not self._executor_accepting():
                 return
 
-            max_step = self._param_float('max_cartesian_step')
-            step_goal = self.planner.limit_step(
-                self.last_end_pose, full_goal, max_step)
-            is_final_step = self._distance(step_goal, full_goal) <= tolerance
-            try:
-                if state_name == 'MOVE_GRASP' and not is_final_step:
-                    step_goal = self.planner.validate_waypoint(
-                        [
-                            step_goal[0],
-                            step_goal[1],
-                            max(float(step_goal[2]), self.planner.safe_motion_z),
-                        ],
-                        is_final_grasp=False,
-                    )
-                else:
-                    step_goal = self.planner.validate_waypoint(
-                        step_goal,
-                        is_final_grasp=(state_name == 'MOVE_GRASP' and is_final_step),
-                    )
-            except Exception as exc:
-                self.get_logger().error(f'{state_name}: unsafe step_goal: {exc}')
-                self._handle_approach_failure(f'{state_name} unsafe step_goal: {exc}')
-                return
-            self.active_motion_goal = [
-                float(step_goal[0]),
-                float(step_goal[1]),
-                float(step_goal[2]),
-            ]
+            if self.active_motion_goal is None:
+                max_step = self._param_float('max_cartesian_step')
+                step_goal = self.planner.limit_step(
+                    self.last_end_pose, full_goal, max_step)
+                is_final_step = self._distance(step_goal, full_goal) <= tolerance
+                try:
+                    if state_name == 'MOVE_GRASP' and not is_final_step:
+                        step_goal = self.planner.validate_waypoint(
+                            [
+                                step_goal[0],
+                                step_goal[1],
+                                max(float(step_goal[2]), self.planner.safe_motion_z),
+                            ],
+                            is_final_grasp=False,
+                        )
+                    else:
+                        step_goal = self.planner.validate_waypoint(
+                            step_goal,
+                            is_final_grasp=(state_name == 'MOVE_GRASP' and is_final_step),
+                        )
+                except Exception as exc:
+                    self.get_logger().error(f'{state_name}: unsafe step_goal: {exc}')
+                    self._handle_approach_failure(f'{state_name} unsafe step_goal: {exc}')
+                    return
+                self.active_motion_goal = [
+                    float(step_goal[0]),
+                    float(step_goal[1]),
+                    float(step_goal[2]),
+                ]
 
             self._publish_cart_target(self.active_motion_goal)
             self.state_command_sent = True
@@ -1517,6 +1574,43 @@ class GraspTaskOpenLoop(Node):
                 f'{state_name}: step_goal settled; ready for next Cartesian step.')
             self._reset_stage_vars()
             return
+
+    def _schedule_blend_busy_retry(self, reason: str):
+        if not bool(self.get_parameter('blend_approach_retry_on_busy').value):
+            self._fallback_blend_to_sequential(reason)
+            return
+
+        max_retries = self._param_int('blend_approach_busy_max_retries')
+        if self.blend_busy_retry_count >= max_retries:
+            self._fallback_blend_to_sequential(
+                f'{reason}; busy retries exceeded {max_retries}')
+            return
+
+        self.blend_busy_retry_count += 1
+        delay = self._param_float('blend_approach_busy_retry_delay_sec')
+        self.blend_busy_retry_after = self._now_sec() + delay
+        self.state_command_sent = True
+        self.stage_motion_started = False
+        self.get_logger().warning(
+            f'BLEND_APPROACH: executor busy / SDK not ready, retry '
+            f'{self.blend_busy_retry_count}/{max_retries} after delay.')
+
+    def _schedule_cartesian_busy_retry(self, reason: str):
+        max_retries = self._param_int('sequential_busy_max_retries')
+        if self.cartesian_busy_retry_count >= max_retries:
+            self._handle_approach_failure(
+                f'{reason}; busy retries exceeded {max_retries}')
+            return
+
+        self.cartesian_busy_retry_count += 1
+        delay = self._param_float('post_motion_command_cooldown_sec')
+        self.cartesian_busy_retry_after = self._now_sec() + delay
+        self.state_command_sent = True
+        self.stage_motion_started = False
+        self.settle_start_time = None
+        self.get_logger().warning(
+            f'{self.task_state}: executor busy / SDK not ready, retry '
+            f'{self.cartesian_busy_retry_count}/{max_retries} after cooldown.')
 
     def _valid_target(self, msg: VisualTarget) -> bool:
         frame_id = msg.header.frame_id.strip()
@@ -1639,6 +1733,10 @@ class GraspTaskOpenLoop(Node):
         self.recover_reset_command = None
         self.pending_speed_profile = None
         self.last_reset_executor_time = None
+        self.recover_command_sent = False
+        self.recover_command_type = None
+        self.recover_command_time = None
+        self.recover_timeout_logged = False
         self.rejected_busy_count = 0
         self._transition('RECOVER')
 
@@ -1659,6 +1757,10 @@ class GraspTaskOpenLoop(Node):
         self.recover_reset_command = None
         self.pending_speed_profile = None
         self.last_reset_executor_time = None
+        self.recover_command_sent = False
+        self.recover_command_type = None
+        self.recover_command_time = None
+        self.recover_timeout_logged = False
         self.rejected_busy_count = 0
         self._transition('RECOVER')
 
@@ -1693,6 +1795,14 @@ class GraspTaskOpenLoop(Node):
         self.recover_reset_command = None
         self.gripper_settle_start = None
         self.last_reset_executor_time = None
+        self.blend_busy_retry_count = 0
+        self.blend_busy_retry_after = None
+        self.cartesian_busy_retry_count = 0
+        self.cartesian_busy_retry_after = None
+        self.recover_command_sent = False
+        self.recover_command_type = None
+        self.recover_command_time = None
+        self.recover_timeout_logged = False
         self.rejected_busy_count = 0
         self.last_visual_lost_warning_time = None
         self.last_target_failure_reason = None
@@ -1732,6 +1842,12 @@ class GraspTaskOpenLoop(Node):
             self._target_mgr.reset_stability()
         if old_state != new_state:
             self.rejected_busy_count = 0
+            if new_state == 'MOVE_APPROACH_BLEND':
+                self.blend_busy_retry_count = 0
+                self.blend_busy_retry_after = None
+            if new_state in ('MOVE_PRE_GRASP', 'MOVE_GRASP'):
+                self.cartesian_busy_retry_count = 0
+                self.cartesian_busy_retry_after = None
             self.last_status_log_time = None
             self.get_logger().info(
                 f'[GRASP] {old_state} -> {new_state}; '

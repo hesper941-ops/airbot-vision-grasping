@@ -94,6 +94,9 @@ class GraspTaskConfig:
     max_approach_mode_retries: int = 1
     blend_approach_enabled: bool = True
     blend_approach_fallback_to_sequential: bool = True
+    blend_approach_retry_on_busy: bool = True
+    blend_approach_busy_retry_delay_sec: float = 1.5
+    blend_approach_busy_max_retries: int = 3
 
     # Geometry (meters)
     pre_grasp_z_offset: float = 0.10
@@ -167,6 +170,8 @@ class GraspTaskConfig:
     recover_clear_error_interval_sec: float = 0.5
     recover_return_init_pose: bool = True
     auto_recover_joint_limit: bool = True
+    post_motion_command_cooldown_sec: float = 1.5
+    sequential_busy_max_retries: int = 3
 
     # -- Active search -------------------------------------------------------
     active_search: ActiveSearchConfig = field(default_factory=ActiveSearchConfig)
@@ -248,6 +253,11 @@ class GraspTaskConfig:
             blend_approach_enabled=_pb("blend_approach_enabled", True),
             blend_approach_fallback_to_sequential=_pb(
                 "blend_approach_fallback_to_sequential", True),
+            blend_approach_retry_on_busy=_pb("blend_approach_retry_on_busy", True),
+            blend_approach_busy_retry_delay_sec=_pf(
+                "blend_approach_busy_retry_delay_sec", 1.5),
+            blend_approach_busy_max_retries=_pi(
+                "blend_approach_busy_max_retries", 3),
 
             pre_grasp_z_offset=_pf("pre_grasp_z_offset", 0.10),
             grasp_z_offset=_pf("grasp_z_offset", 0.02),
@@ -309,6 +319,8 @@ class GraspTaskConfig:
             recover_clear_error_interval_sec=_pf("recover_clear_error_interval_sec", 0.5),
             recover_return_init_pose=_pb("recover_return_init_pose", True),
             auto_recover_joint_limit=_pb("auto_recover_joint_limit", True),
+            post_motion_command_cooldown_sec=_pf("post_motion_command_cooldown_sec", 1.5),
+            sequential_busy_max_retries=_pi("sequential_busy_max_retries", 3),
 
             active_search=asc,
         )
