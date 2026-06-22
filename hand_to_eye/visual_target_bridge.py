@@ -82,15 +82,15 @@ class VisualTargetBridge(Node):
         self.image_height = int(self.get_parameter('image_height').value)
 
         self.t_cam2gripper = [
-            -0.0830395307186257,
-            0.008112286716840913,
-            0.08580828291231507,
+            0.09135190476527959,
+            -0.07201739513738753,
+            0.011442796927694777,
         ]
         self.q_cam2gripper_xyzw = [
-            -0.49270434706957716,
-            0.5001884081237661,
-            -0.49995706645552335,
-            0.5070472507158893,
+            -0.1219551044160354,
+            0.694256163711082,
+            0.125630634909801,
+            0.6981062062667869,
         ]
         self.rotation_gripper_camera = quat_xyzw_to_rot(*self.q_cam2gripper_xyzw)
 
