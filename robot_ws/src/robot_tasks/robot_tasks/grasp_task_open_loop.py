@@ -873,7 +873,8 @@ class GraspTaskOpenLoop(Node):
                 'return to WAIT_PRE_TARGET without motion.')
             self._transition('WAIT_PRE_TARGET', clear_window=True)
             return
-        self._set_speed_profile('fast')
+        self._set_speed_profile('default')
+        self.get_logger().info('Approach speed_profile set to default for MOVE_APPROACH_BLEND / MOVE_PRE_GRASP.')
         if self._should_use_blend_approach():
             self._transition('MOVE_APPROACH_BLEND')
         else:
@@ -1442,7 +1443,8 @@ class GraspTaskOpenLoop(Node):
             self._finish_cycle()
 
     def _handle_move_retreat(self):
-        self._set_speed_profile('fast')
+        self._set_speed_profile('default')
+        self.get_logger().info('Retreat speed_profile set to default for MOVE_RETREAT.')
         self._handle_cartesian_motion(
             'MOVE_RETREAT',
             lambda: self._compute_safe_retreat_goal(),
