@@ -29,7 +29,7 @@ class GraspPlanner:
         self.workspace_soft_margin_m = float(config.get('workspace_soft_margin_m', 0.04))
         self.min_front_pre_grasp_distance_m = float(
             config.get('min_front_pre_grasp_distance_m', 0.04))
-        self.front_grasp_x_offset = float(config.get('front_grasp_x_offset', 0.065))
+        self.front_grasp_x_offset = float(config.get('front_grasp_x_offset', 0.0))
         self.front_grasp_x_offset_max = float(config.get('front_grasp_x_offset_max', 0.075))
         self.min_safe_motion_z = float(config.get('min_safe_motion_z', 0.08))
         self.reject_target_below_table = bool(config.get('reject_target_below_table', True))

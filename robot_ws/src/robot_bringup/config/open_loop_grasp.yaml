@@ -138,7 +138,7 @@ grasp_task_open_loop:
     adaptive_front_pre_grasp: true
     workspace_soft_margin_m: 0.04
     min_front_pre_grasp_distance_m: 0.04
-    front_grasp_x_offset: 0.065
+    front_grasp_x_offset: 0.0
     front_grasp_x_offset_max: 0.075
 
     # ==================================================================

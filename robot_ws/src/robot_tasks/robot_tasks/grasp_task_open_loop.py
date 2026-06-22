@@ -187,7 +187,7 @@ class GraspTaskOpenLoop(Node):
         self.declare_parameter('adaptive_front_pre_grasp', True)
         self.declare_parameter('workspace_soft_margin_m', 0.04)
         self.declare_parameter('min_front_pre_grasp_distance_m', 0.04)
-        self.declare_parameter('front_grasp_x_offset', 0.065)
+        self.declare_parameter('front_grasp_x_offset', 0.0)
         self.declare_parameter('front_grasp_x_offset_max', 0.075)
         self.declare_parameter('min_safe_motion_z', 0.08)
         self.declare_parameter('reject_target_below_table', True)

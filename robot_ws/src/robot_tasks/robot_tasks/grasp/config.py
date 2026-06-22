@@ -126,7 +126,7 @@ class GraspTaskConfig:
     adaptive_front_pre_grasp: bool = True
     workspace_soft_margin_m: float = 0.04
     min_front_pre_grasp_distance_m: float = 0.04
-    front_grasp_x_offset: float = 0.065
+    front_grasp_x_offset: float = 0.0
     front_grasp_x_offset_max: float = 0.075
 
     # -- Table / workspace safety (meters) -----------------------------------
@@ -307,7 +307,7 @@ class GraspTaskConfig:
             adaptive_front_pre_grasp=_pb("adaptive_front_pre_grasp", True),
             workspace_soft_margin_m=_pf("workspace_soft_margin_m", 0.04),
             min_front_pre_grasp_distance_m=_pf("min_front_pre_grasp_distance_m", 0.04),
-            front_grasp_x_offset=_pf("front_grasp_x_offset", 0.065),
+            front_grasp_x_offset=_pf("front_grasp_x_offset", 0.0),
             front_grasp_x_offset_max=_pf("front_grasp_x_offset_max", 0.075),
 
             table_z=_pf("table_z", 0.0),
