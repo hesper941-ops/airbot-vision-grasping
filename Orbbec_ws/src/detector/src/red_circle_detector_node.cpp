@@ -15,12 +15,12 @@
 
 using std::placeholders::_1;
 
-class AppleDetector : public rclcpp::Node
+class RedCircleDetector : public rclcpp::Node
 {
 public:
-    AppleDetector() : Node("apple_detector"),
-                      window_name_("Apple Detector"),
-                      mask_window_name_("Apple Mask")
+    RedCircleDetector() : Node("red_circle_detector"),
+                          window_name_("Red Circle Detector"),
+                          mask_window_name_("Red Circle Mask")
     {
         show_image_ = this->declare_parameter<bool>("show_image", false);
         min_depth_mm_ = this->declare_parameter<int>("min_depth_mm", 100);
@@ -28,18 +28,18 @@ public:
 
         color_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             "/camera/color/image_raw", 1,
-            std::bind(&AppleDetector::colorCallback, this, _1));
+            std::bind(&RedCircleDetector::colorCallback, this, _1));
 
         depth_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
             "/camera/depth/image_raw", 1,
-            std::bind(&AppleDetector::depthCallback, this, _1));
+            std::bind(&RedCircleDetector::depthCallback, this, _1));
 
         camera_info_sub_ = this->create_subscription<sensor_msgs::msg::CameraInfo>(
             "/camera/color/camera_info", 1,
-            std::bind(&AppleDetector::cameraInfoCallback, this, _1));
+            std::bind(&RedCircleDetector::cameraInfoCallback, this, _1));
 
         publisher_ = this->create_publisher<geometry_msgs::msg::PointStamped>(
-            "/apple_position", 3);
+            "/red_circle_position", 3);
 
         if (show_image_) {
             cv::namedWindow(window_name_, cv::WINDOW_NORMAL);
@@ -50,12 +50,12 @@ public:
         }
 
         RCLCPP_INFO(this->get_logger(),
-                    "Apple detector node started, show_image=%s, depth_range=[%d, %d] mm",
+                    "Red circle detector node started, show_image=%s, depth_range=[%d, %d] mm",
                     show_image_ ? "true" : "false",
                     min_depth_mm_, max_depth_mm_);
     }
 
-    ~AppleDetector()
+    ~RedCircleDetector()
     {
         if (show_image_) {
             cv::destroyWindow(window_name_);
@@ -512,7 +512,7 @@ private:
         }
 
         if (best < 0) {
-            drawTextLine(display, "No apple detected", 20, 35);
+            drawTextLine(display, "No red circle detected", 20, 35);
             showFrame(display, mask);
             return;
         }
@@ -540,7 +540,7 @@ private:
                    static_cast<int>(radius), cv::Scalar(255, 0, 0), 2);
 
         if (depth_mm <= 0) {
-            drawTextLine(display, "Apple depth invalid", 20, 35);
+            drawTextLine(display, "Red circle depth invalid", 20, 35);
 
             char buf[128];
             std::snprintf(buf, sizeof(buf), "pixel=(%d,%d)", u, v);
@@ -550,13 +550,13 @@ private:
 
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
-                "Apple detected at (%d, %d), but depth is invalid", u, v);
+                "Red circle detected at (%d, %d), but depth is invalid", u, v);
 
             return;
         }
 
         if (depth_mm < min_depth_mm_ || depth_mm > max_depth_mm_) {
-            drawTextLine(display, "Apple depth out of range", 20, 35);
+            drawTextLine(display, "Red circle depth out of range", 20, 35);
 
             char buf[128];
             std::snprintf(buf, sizeof(buf), "depth=%d mm range=[%d,%d]",
@@ -567,7 +567,7 @@ private:
 
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
-                "Apple depth out of range: %d mm", depth_mm);
+                "Red circle depth out of range: %d mm", depth_mm);
 
             return;
         }
@@ -577,12 +577,12 @@ private:
         double Z = 0.0;
 
         if (!pixelToCamera3D(u, v, depth_mm, X, Y, Z)) {
-            drawTextLine(display, "Apple 3D convert failed", 20, 35);
+            drawTextLine(display, "Red circle 3D convert failed", 20, 35);
             showFrame(display, obj_mask);
 
             RCLCPP_WARN_THROTTLE(
                 this->get_logger(), *this->get_clock(), 1000,
-                "Failed to convert apple pixel to camera 3D point");
+                "Failed to convert red circle pixel to camera 3D point");
 
             return;
         }
@@ -601,7 +601,7 @@ private:
 
         publisher_->publish(msg_out);
 
-        drawTextLine(display, "Apple detected", 20, 35);
+        drawTextLine(display, "Red circle detected", 20, 35);
 
         char buf1[128];
         char buf2[128];
@@ -619,7 +619,7 @@ private:
 
         RCLCPP_INFO_THROTTLE(
             this->get_logger(), *this->get_clock(), 500,
-            "Publish apple_position: X=%.3f m, Y=%.3f m, Z=%.3f m "
+            "Publish red_circle_position: X=%.3f m, Y=%.3f m, Z=%.3f m "
             "(pixel u=%d, v=%d, depth=%d mm)",
             X, Y, Z, u, v, depth_mm);
     }
@@ -628,7 +628,7 @@ private:
 int main(int argc, char **argv)
 {
     rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<AppleDetector>());
+    rclcpp::spin(std::make_shared<RedCircleDetector>());
     rclcpp::shutdown();
     return 0;
 }

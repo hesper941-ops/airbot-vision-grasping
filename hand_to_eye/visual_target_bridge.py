@@ -113,8 +113,32 @@ class VisualTargetBridge(Node):
         )
         self.apple_sub = self.create_subscription(
             PointStamped,
-            '/apple_position',
-            lambda msg: self.object_callback(msg, 'apple', '/apple_position'),
+            '/detect_yolo/apple_position',
+            lambda msg: self.object_callback(msg, 'apple', '/detect_yolo/apple_position'),
+            10,
+        )
+        self.banana_sub = self.create_subscription(
+            PointStamped,
+            '/detect_yolo/banana_position',
+            lambda msg: self.object_callback(msg, 'banana', '/detect_yolo/banana_position'),
+            10,
+        )
+        self.bottle_sub = self.create_subscription(
+            PointStamped,
+            '/detect_yolo/bottle_position',
+            lambda msg: self.object_callback(msg, 'bottle', '/detect_yolo/bottle_position'),
+            10,
+        )
+        self.cake_sub = self.create_subscription(
+            PointStamped,
+            '/detect_yolo/cake_position',
+            lambda msg: self.object_callback(msg, 'cake', '/detect_yolo/cake_position'),
+            10,
+        )
+        self.red_circle_sub = self.create_subscription(
+            PointStamped,
+            '/red_circle_position',
+            lambda msg: self.object_callback(msg, 'red_circle', '/red_circle_position'),
             10,
         )
         self.box_sub = self.create_subscription(
@@ -133,7 +157,9 @@ class VisualTargetBridge(Node):
         self.timer = self.create_timer(timer_period, self.republish_latest_target)
 
         self.get_logger().info(
-            'Listening: /robot_arm/end_pose, /duck_position, /apple_position, /box_position')
+            'Listening: /robot_arm/end_pose, /duck_position, /red_circle_position, '
+            '/box_position, /detect_yolo/apple_position, /detect_yolo/banana_position, '
+            '/detect_yolo/bottle_position, /detect_yolo/cake_position')
         self.get_logger().info('Publishing: /visual_target_base (robot_msgs/msg/VisualTarget)')
         self.get_logger().info(
             f'Handeye ^gT_c translation={self.t_cam2gripper}, '
