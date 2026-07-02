@@ -1,8 +1,9 @@
 """Launch the default open-loop grasp pipeline.
 
-This launch file starts only:
+This launch file starts:
   1. arm_executor_node
-  2. grasp_task_open_loop
+  2. pose_switch_node
+  3. grasp_task_open_loop
 
 camera_to_base_transform.py is still part of the recommended main pipeline,
 but it is started by the user in another terminal. It converts /duck_position
@@ -61,10 +62,19 @@ def generate_launch_description():
         ],
     )
 
+    pose_switch_node = Node(
+        package='robot_arm_driver',
+        executable='pose_switch_node',
+        name='pose_switch_node',
+        output='screen',
+        parameters=[LaunchConfiguration('config_file')],
+    )
+
     return LaunchDescription([
         config_arg,
         task_log_level_arg,
         executor_log_level_arg,
         arm_bringup,
+        pose_switch_node,
         open_loop_node,
     ])

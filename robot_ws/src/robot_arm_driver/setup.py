@@ -24,7 +24,8 @@ setup(
     },
     entry_points={
         'console_scripts': [
-        'arm_executor_node = robot_arm_driver.arm_executor_node:main',
+            'arm_executor_node = robot_arm_driver.arm_executor_node:main',
+            'pose_switch_node = robot_arm_driver.pose_switch_node:main',
         ],
     },
 )
