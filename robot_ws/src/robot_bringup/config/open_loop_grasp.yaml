@@ -3,7 +3,9 @@
 #
 # Main data flow:
 #   detector nodes
-#       -> /duck_position, /green_box_position, /apple_position
+#       -> /duck_position, /box_position, /red_circle_position
+#       -> /detect_yolo/apple_position, /detect_yolo/banana_position,
+#          /detect_yolo/bottle_position, /detect_yolo/cake_position
 #   transform / target manager
 #       -> /visual_target_base
 #   grasp_task_open_loop
@@ -315,15 +317,43 @@ grasp_task_open_loop:
         stable_position_tolerance_m: 0.015
         target_timeout_sec: 1.0
 
-      green_box:
-        input_topic: "/green_box_position"
+      box:
+        input_topic: "/box_position"
         frame_id: "camera_color_optical_frame"
         stable_required_count: 5
         stable_position_tolerance_m: 0.015
         target_timeout_sec: 1.0
 
       apple:
-        input_topic: "/apple_position"
+        input_topic: "/detect_yolo/apple_position"
+        frame_id: "camera_color_optical_frame"
+        stable_required_count: 5
+        stable_position_tolerance_m: 0.015
+        target_timeout_sec: 1.0
+
+      banana:
+        input_topic: "/detect_yolo/banana_position"
+        frame_id: "camera_color_optical_frame"
+        stable_required_count: 5
+        stable_position_tolerance_m: 0.015
+        target_timeout_sec: 1.0
+
+      bottle:
+        input_topic: "/detect_yolo/bottle_position"
+        frame_id: "camera_color_optical_frame"
+        stable_required_count: 5
+        stable_position_tolerance_m: 0.015
+        target_timeout_sec: 1.0
+
+      cake:
+        input_topic: "/detect_yolo/cake_position"
+        frame_id: "camera_color_optical_frame"
+        stable_required_count: 5
+        stable_position_tolerance_m: 0.015
+        target_timeout_sec: 1.0
+
+      red_circle:
+        input_topic: "/red_circle_position"
         frame_id: "camera_color_optical_frame"
         stable_required_count: 5
         stable_position_tolerance_m: 0.015

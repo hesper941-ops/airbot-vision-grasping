@@ -12,14 +12,14 @@ find_package(cv_bridge REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 
-add_executable(apple_detector_node src/apple_detector_node.cpp)
-ament_target_dependencies(apple_detector_node
+add_executable(red_circle_detector_node src/red_circle_detector_node.cpp)
+ament_target_dependencies(red_circle_detector_node
   rclcpp
   sensor_msgs
   cv_bridge
   geometry_msgs
 )
-target_link_libraries(apple_detector_node
+target_link_libraries(red_circle_detector_node
   ${OpenCV_LIBS}
 )
 
@@ -46,7 +46,7 @@ target_link_libraries(box_detector_node
 )
 
 install(TARGETS
-  apple_detector_node
+  red_circle_detector_node
   duck_detector_node
   box_detector_node
   DESTINATION lib/${PROJECT_NAME}

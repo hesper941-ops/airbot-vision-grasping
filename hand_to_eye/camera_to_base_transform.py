@@ -3,7 +3,9 @@
 """Convert detector camera-frame points into base_link VisualTarget messages.
 
 Main real-robot chain:
-  /duck_position, /apple_position, /box_position (PointStamped, camera frame)
+  /duck_position, /red_circle_position, /box_position (PointStamped, camera frame)
+  + /detect_yolo/apple_position, /detect_yolo/banana_position,
+    /detect_yolo/bottle_position, /detect_yolo/cake_position (PointStamped, camera frame)
   + /robot_arm/end_pose (PoseStamped, base_link -> gripper)
   -> /visual_target_base (robot_msgs/VisualTarget, base_link)
 
@@ -18,6 +20,8 @@ import numpy as np
 import rclpy
 from geometry_msgs.msg import PointStamped, PoseStamped
 from rclpy.node import Node
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
+from std_msgs.msg import String
 
 from robot_msgs.msg import VisualTarget
 
@@ -80,6 +84,9 @@ class CameraToBaseTransformer(Node):
         self.republish_rate_hz = float(self.get_parameter('republish_rate_hz').value)
         self.target_hold_sec = float(self.get_parameter('target_hold_sec').value)
         self.target_timeout_sec = float(self.get_parameter('target_timeout_sec').value)
+        self.active_object_filter_enabled = bool(
+            self.get_parameter('active_object_filter_enabled').value)
+        self.active_object_name = str(self.get_parameter('active_object_name').value)
 
         self.t_cam2gripper = np.array(
             self.get_parameter('cam_to_gripper_translation').value,
@@ -112,6 +119,17 @@ class CameraToBaseTransformer(Node):
             self.pose_callback,
             10,
         )
+        if self.active_object_filter_enabled:
+            self.active_object_sub = self.create_subscription(
+                String,
+                '/arm_task/active_object',
+                self.active_object_callback,
+                QoSProfile(
+                    depth=1,
+                    durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                    reliability=ReliabilityPolicy.RELIABLE,
+                ),
+            )
         self.duck_sub = self.create_subscription(
             PointStamped,
             '/duck_position',
@@ -120,8 +138,32 @@ class CameraToBaseTransformer(Node):
         )
         self.apple_sub = self.create_subscription(
             PointStamped,
-            '/apple_position',
-            lambda msg: self.object_callback(msg, 'apple', '/apple_position'),
+            '/detect_yolo/apple_position',
+            lambda msg: self.object_callback(msg, 'apple', '/detect_yolo/apple_position'),
+            10,
+        )
+        self.banana_sub = self.create_subscription(
+            PointStamped,
+            '/detect_yolo/banana_position',
+            lambda msg: self.object_callback(msg, 'banana', '/detect_yolo/banana_position'),
+            10,
+        )
+        self.bottle_sub = self.create_subscription(
+            PointStamped,
+            '/detect_yolo/bottle_position',
+            lambda msg: self.object_callback(msg, 'bottle', '/detect_yolo/bottle_position'),
+            10,
+        )
+        self.cake_sub = self.create_subscription(
+            PointStamped,
+            '/detect_yolo/cake_position',
+            lambda msg: self.object_callback(msg, 'cake', '/detect_yolo/cake_position'),
+            10,
+        )
+        self.red_circle_sub = self.create_subscription(
+            PointStamped,
+            '/red_circle_position',
+            lambda msg: self.object_callback(msg, 'red_circle', '/red_circle_position'),
             10,
         )
         self.box_sub = self.create_subscription(
@@ -142,7 +184,9 @@ class CameraToBaseTransformer(Node):
 
         self.get_logger().info(
             'CameraToBaseTransformer started. Listening: /robot_arm/end_pose, '
-            '/duck_position, /apple_position, /box_position')
+            '/duck_position, /red_circle_position, /box_position, '
+            '/detect_yolo/apple_position, /detect_yolo/banana_position, '
+            '/detect_yolo/bottle_position, /detect_yolo/cake_position')
         self.get_logger().info('Publishing: /visual_target_base (robot_msgs/msg/VisualTarget)')
         self.get_logger().info(
             f'Using ^gT_c translation={self.t_cam2gripper.tolist()}, '
@@ -154,6 +198,9 @@ class CameraToBaseTransformer(Node):
             f'assume_target_stable={self.assume_target_stable}, '
             f'republish_rate_hz={self.republish_rate_hz:.2f}, '
             f'target_hold_sec={self.target_hold_sec:.2f}')
+        if self.active_object_filter_enabled:
+            self.get_logger().info(
+                f'Active object filter enabled. Initial active_object_name={self.active_object_name!r}.')
 
     def _declare_parameters(self):
         self.declare_parameter(
@@ -174,14 +221,29 @@ class CameraToBaseTransformer(Node):
         self.declare_parameter('republish_rate_hz', 1.0)
         self.declare_parameter('target_hold_sec', 0.0)
         self.declare_parameter('target_timeout_sec', 1.5)
+        self.declare_parameter('active_object_filter_enabled', False)
+        self.declare_parameter('active_object_name', '')
 
     def pose_callback(self, msg: PoseStamped):
         """Cache the latest end-effector pose (^bT_g)."""
         self.latest_pose_msg = msg
         self.latest_pose_time_sec = self.now_sec()
 
+    def active_object_callback(self, msg: String):
+        """Limit /visual_target_base to the object requested by arm_task_manager."""
+        new_active = msg.data.strip()
+        if new_active == self.active_object_name:
+            return
+        self.active_object_name = new_active
+        self.latest_target = None
+        self.last_detector_time_sec = None
+        self.get_logger().info(f'Active grasp object changed to {new_active!r}.')
+
     def object_callback(self, msg: PointStamped, object_name: str, source_topic: str):
         """Transform a detector point and publish it as a VisualTarget."""
+        if not self.object_allowed(object_name):
+            return
+
         self.last_detector_time_sec = self.now_sec()
 
         if self.latest_pose_msg is None:
@@ -231,6 +293,18 @@ class CameraToBaseTransformer(Node):
             f'{object_name} from {source_topic}: camera={fmt_xyz(camera_xyz)} base={fmt_xyz(base_xyz)}',
             0.5,
         )
+
+    def object_allowed(self, object_name: str) -> bool:
+        if not self.active_object_filter_enabled:
+            return True
+        if not self.active_object_name:
+            self.warn_throttled(
+                'waiting_active_object',
+                'Waiting for /arm_task/active_object before forwarding visual targets.',
+                2.0,
+            )
+            return False
+        return object_name == self.active_object_name
 
     def republish_latest_target(self):
         """Monitor detector health; only republish when target_hold_sec > 0."""
