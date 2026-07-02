@@ -53,13 +53,14 @@ arm_executor_node:
 
 # ======================================================================
 # [1.5] ARM POSE SWITCH NODE
-#     Topic-only standby / ready pose selection; never calls AIRBOT SDK.
+#     Topic-only strict idle / near_grasp / pre_grasp pose selection; never calls AIRBOT SDK.
 # ======================================================================
 pose_switch_node:
   ros__parameters:
     pose_switch_cmd_topic: "/robot_arm/pose_switch_cmd"
-    standby_joint_pos_deg: [0.0, -45.0, 120.0, -90.0, 40.0, 0.0]
-    ready_grasp_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 0.0]
+    idle_joint_pos_deg: [0.0, -45.0, 120.0, -90.0, 40.0, 0.0]
+    near_grasp_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 0.0]
+    pre_grasp_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 0.0]
 
 
 # ======================================================================
@@ -144,14 +145,14 @@ grasp_task_open_loop:
 
     # 预抓取 / 抓取 / 抬升 / 前方靠近偏移量 (meter).
     pre_grasp_z_offset: 0.05
-    grasp_z_offset: 0.05
+    grasp_z_offset: 0.10
     lift_z_offset: 0.04
     front_approach_x_offset: -0.10
     front_approach_z_offset: 0.05
     adaptive_front_pre_grasp: true
     workspace_soft_margin_m: 0.04
     min_front_pre_grasp_distance_m: 0.04
-    front_grasp_x_offset: -0.10
+    front_grasp_x_offset: -0.15
     front_grasp_x_offset_max: 0.15
 
     # ==================================================================
