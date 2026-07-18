@@ -52,6 +52,17 @@ arm_executor_node:
 
 
 # ======================================================================
+# [1.5] ARM POSE SWITCH NODE
+#     Topic-only standby / ready pose selection; never calls AIRBOT SDK.
+# ======================================================================
+pose_switch_node:
+  ros__parameters:
+    pose_switch_cmd_topic: "/robot_arm/pose_switch_cmd"
+    standby_joint_pos_deg: [0.0, -45.0, 120.0, -90.0, 40.0, 0.0]
+    ready_grasp_joint_pos_deg: [0.0, -45.0, 110.0, -90.0, 90.0, 0.0]
+
+
+# ======================================================================
 # [2] GRASP TASK OPEN LOOP
 #     grasp_task_open_loop — 抓取状态机任务节点
 # ======================================================================
@@ -140,8 +151,8 @@ grasp_task_open_loop:
     adaptive_front_pre_grasp: true
     workspace_soft_margin_m: 0.04
     min_front_pre_grasp_distance_m: 0.04
-    front_grasp_x_offset: -0.05
-    front_grasp_x_offset_max: 0.075
+    front_grasp_x_offset: -0.10
+    front_grasp_x_offset_max: 0.15
 
     # ==================================================================
     # [2.5] Legacy J6 settings, not used by open_loop main path.
