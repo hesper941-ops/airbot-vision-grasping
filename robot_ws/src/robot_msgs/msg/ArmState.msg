@@ -1,0 +1,9 @@
+std_msgs/Header header
+string arm_state
+bool busy
+bool success
+string last_command
+string error_message
+float64[] joint_pos
+float64[] end_position
+float64[] end_orientation

@@ -1,0 +1,5 @@
+happy
+low_mood
+negative_distress
+neutral
+surprise

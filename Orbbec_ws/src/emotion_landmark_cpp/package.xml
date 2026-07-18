@@ -1,0 +1,19 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>emotion_landmark_cpp</name>
+  <version>0.0.1</version>
+  <description>RDK X5 face landmark ROI inference test node</description>
+  <maintainer email="xjt@example.com">xjt</maintainer>
+  <license>Apache-2.0</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>cv_bridge</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
