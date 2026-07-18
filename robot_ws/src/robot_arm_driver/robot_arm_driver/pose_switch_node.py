@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Publish configured standby or ready joint poses through the arm executor."""
+"""Publish strict configured arm poses through the arm executor."""
 
 import math
 
@@ -17,10 +17,13 @@ class PoseSwitchNode(Node):
         self.declare_parameter(
             'pose_switch_cmd_topic', '/robot_arm/pose_switch_cmd')
         self.declare_parameter(
-            'standby_joint_pos_deg',
+            'idle_joint_pos_deg',
             [0.0, -45.0, 110.0, -90.0, 90.0, 0.0])
         self.declare_parameter(
-            'ready_grasp_joint_pos_deg',
+            'near_grasp_joint_pos_deg',
+            [0.0, -45.0, 110.0, -90.0, 90.0, 0.0])
+        self.declare_parameter(
+            'pre_grasp_joint_pos_deg',
             [0.0, -45.0, 110.0, -90.0, 90.0, 0.0])
 
         self.executor_status = 'UNKNOWN'
@@ -54,8 +57,7 @@ class PoseSwitchNode(Node):
         resolved = self._resolve_pose(command)
         if resolved is None:
             self.get_logger().warning(
-                f'Unsupported pose switch command: raw={raw_command!r}. '
-                'Expected standby/idle or ready/pre_grasp.')
+                f'Unknown pose switch command: {command}')
             return
 
         pose_name, parameter_name = resolved
@@ -64,7 +66,7 @@ class PoseSwitchNode(Node):
             for value in self.get_parameter(parameter_name).value
         ]
         self.get_logger().info(
-            f'Pose switch resolved: pose={pose_name}, '
+            f"Pose switch command='{command}', resolved_pose='{pose_name}', "
             f'target_joint_deg={target_deg}.')
 
         if self.executor_status in ('BUSY', 'ERROR'):
@@ -85,14 +87,17 @@ class PoseSwitchNode(Node):
         self.target_joint_pub.publish(command_msg)
         self.get_logger().info(
             'Pose switch published to /robot_arm/target_joint: '
-            f'pose={pose_name}, target_joint_rad={target_rad}.')
+            f"command='{command}', resolved_pose='{pose_name}', "
+            f'target_joint_rad={target_rad}.')
 
     @staticmethod
     def _resolve_pose(command: str):
-        if command in ('standby', 'idle'):
-            return 'standby', 'standby_joint_pos_deg'
-        if command in ('ready', 'pre_grasp'):
-            return 'ready_grasp', 'ready_grasp_joint_pos_deg'
+        if command == 'idle':
+            return 'idle', 'idle_joint_pos_deg'
+        if command == 'near_grasp':
+            return 'near_grasp', 'near_grasp_joint_pos_deg'
+        if command == 'pre_grasp':
+            return 'pre_grasp', 'pre_grasp_joint_pos_deg'
         return None
 
 
